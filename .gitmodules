@@ -1,0 +1,3 @@
+[submodule "datasets/elco"]
+	path = datasets/elco
+	url = https://github.com/WING-NUS/ELCo.git
