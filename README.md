@@ -18,6 +18,8 @@ This project aims to create a transformer that can compress the representation o
 1) If you have uv installed, just run `uv sync --extra cpu`
 2) If you do not use uv, run `pip install -r requirements_cpu.txt`
 
+### Installing ELCO
+ELCO has been added as a separate git submodule, so just run ```git submodule update --init --recursive```
 
 # Team
 Yao Hejun  
