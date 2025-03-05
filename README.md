@@ -2,7 +2,7 @@
 Emoji Transformer
 
 # About
-This project aims to create a transformer tht can compress the representation of English into emojis.
+This project aims to create a transformer that can compress the representation of English into emojis.
 
 # Installation
 - This project uses Python 3.10, and torch in order to train and run inference on the transformer.
