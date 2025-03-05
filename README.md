@@ -20,9 +20,9 @@ This project aims to create a transformer tht can compress the representation of
 
 
 # Team
-Yao Hejun
-Luca Baumann
-Jin Chun
-Zhang Mengjie
-Ma Jia Jun
+Yao Hejun  
+Luca Baumann  
+Jin Chun  
+Zhang Mengjie  
+Ma Jia Jun  
 Warren Low
