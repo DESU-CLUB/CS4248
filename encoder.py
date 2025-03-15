@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import Embedding, TransformerEncoder, TransformerEncoderLayer, Linear
 from tqdm import tqdm
 from matplotlib import pyplot as plt
-from sklearn.feature_extraction.text import TfidfVectorizer
 torch.manual_seed(0) # for reproducibility
 torch.set_default_dtype(torch.float32)
 
