@@ -1,3 +1,4 @@
+# Package dependencies
 datasets>=3.3.2
 ipykernel>=6.29.5
 jupyter>=1.1.1
@@ -7,7 +8,7 @@ transformers>=4.49.0
 trl>=0.15.2
 
 # PyTorch for CPU
---index-url https://download.pytorch.org/whl/cpu
+# --index-url https://download.pytorch.org/whl/cpu
 torch>=2.6.0
 torchvision>=0.21.0
 
