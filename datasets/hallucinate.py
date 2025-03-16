@@ -16,7 +16,7 @@ client = OpenAI()
 # Function to generate a short phrase or sentence from emoji and label
 def generate_phrase_from_emoji_and_label(emoji, label):
     # Use the OpenAI API to generate a sentence
-    prompt = f"Generate a short phrase or sentence using the emoji: {emoji} and the label concept: {label}. The sentence should be relevant to the emoji and label."
+    prompt = f"Generate a sentence using the emoji: {emoji} and the label concept: {label}. The sentence should be relevant to the emoji and label."
 
     # Call the OpenAI API
     response = client.chat.completions.create(
