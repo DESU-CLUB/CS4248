@@ -16,7 +16,7 @@ client = OpenAI()
 # Function to generate a short phrase or sentence from emoji and label
 def generate_phrase_from_emoji_and_label(emoji, label):
     # Use the OpenAI API to generate a sentence
-    prompt = f"Generate a sentence using the emoji: {emoji} and the label concept: {label}. The sentence should be relevant to the emoji and label."
+    prompt = f"Convert the following emoji to a text sentence. The text-only sentence should be relevant to the emoji and label. Emoji: {emoji} and the label concept: {label}. "
 
     # Call the OpenAI API
     response = client.chat.completions.create(
@@ -50,11 +50,26 @@ def hallucinate(dataset):
     # Print the first few rows of the updated DataFrame
     dataset.head()
 
+    format_csv()
+
+# Create the CSV file with only emoji and text
+def format_csv():
+    df = pd.read_csv("ELCo_with_sentences.csv")
+
+    # Select only the "generated_sentence" and "EM" columns
+    filtered_df = df[["generated_sentence", "EM"]].rename(columns={"generated_sentence": "text"})
+
+    # Save the new CSV file
+    filtered_df.to_csv("ELCo_adapted.csv", index=False)
+
+    print(filtered_df.head())  # Display the first few rows
+
 
 def test_hallucinate():
     elco_test = elco.head()
     hallucinate(elco_test)
 
 
-if __name__ == "__main__":
-    test_hallucinate()
+# if __name__ == "__main__":
+    # test_hallucinate()
+    # hallucinate(elco)
