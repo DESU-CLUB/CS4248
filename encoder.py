@@ -4,7 +4,10 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import Embedding, TransformerEncoder, TransformerEncoderLayer, Linear
 from tqdm import tqdm
+from transformers import BertTokenizer
 from matplotlib import pyplot as plt
+from datasets import load_dataset
+import numpy as np
 torch.manual_seed(0) # for reproducibility
 torch.set_default_dtype(torch.float32)
 
@@ -25,7 +28,7 @@ class Encoder(torch.nn.Module):
         self.emb = Embedding(voc_size, embed_size, device=device) # (batch, seq_len) -> (batch, seq_len, embed_size)
         enc_layer = TransformerEncoderLayer(embed_size, num_heads, device=device) # (seq_len, batch, embed_size) to same
         self.transformer_enc = TransformerEncoder(enc_layer,num_layers) # (seq_len, batch, embed_size) to same
-        self.pred = Linear(embed_size, 1) #  (seq_len, batch, embed_size) -> (seq_len, batch, 1)
+        self.pred = Linear(embed_size, 2048) #  (seq_len, batch, embed_size) -> (seq_len, batch, 1)
    
     def forward(self, x):
         x = self.emb(x).permute(1, 0, 2) # (batch, seq_len) -> (seq_len, batch, embed_size)
@@ -34,24 +37,30 @@ class Encoder(torch.nn.Module):
 
 epochs = 100
 lr = 1e-3
-batch_size = 1000
+batch_size = 100
 
-### CHANGE THIS ###
 # dataset definition and preprocessing
-data = pd.read_csv("PathToFile")
-X_train, X_test, y_train, y_test = train_test_split(data.iloc[:,:-1].values, data.iloc[:,-1].values, test_size = 0.3, random_state = 0)
+ds = load_dataset("KomeijiForce/Text2Emoji")
+X = ds["train"]['text']
+y = np.zeros_like(np.zeros((len(X),2048))) #ds["train"]['labels']
 
-# Depending on data need to to tokenization first and adapt voc_size
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, random_state = 0)
+tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 
-voc_size = float('inf')
+X_train = [str(x) for x in X_train]
+X_test = [str(x) for x in X_test]
+
+X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
+X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
+
+voc_size = tokenizer.vocab_size
 embed_size = 128
 num_heads = 8
 num_layers = 6
-### END CHANGE THIS ###
 
-train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.long), 
+train_dataset = TensorDataset(X_train_tokenized['input_ids'], 
                               torch.tensor(y_train, dtype=torch.float32))
-test_dataset = TensorDataset(torch.tensor(X_test, dtype=torch.long), 
+test_dataset = TensorDataset(X_test_tokenized['input_ids'], 
                               torch.tensor(y_test, dtype=torch.float32))
 
 model = Encoder(voc_size, embed_size, num_heads, num_layers, device).to(device)
@@ -68,6 +77,9 @@ for epoch in training_loop:
         X_batch = X_batch.to(device) 
         y_batch = y_batch.to(device)
         optimizer.zero_grad()
+        print(model(X_batch).shape)
+        print(y_batch.shape)
+        assert 0
         loss = loss_fn(model(X_batch), y_batch)
         loss.backward()
         optimizer.step()     
