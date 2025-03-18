@@ -85,10 +85,11 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
     else:
         print(f"Using provided maximum length: {max_length}")
     
-    # Process in batches
+    # Process all embeddings first (pure computation phase)
     with torch.no_grad():
-        vector_paths = []
-        for i in tqdm(range(0, len(df), batch_size)):
+        all_embeddings = []  # Store all embeddings in memory
+        
+        for i in tqdm(range(0, len(df), batch_size), desc="Encoding embeddings"):
             # Get batch of emojis
             batch_emojis = df[emoji_column].iloc[i:i+batch_size].tolist()
             
@@ -96,24 +97,38 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
             encoded = tokenizer(batch_emojis, return_tensors="pt", padding='max_length', 
                                truncation=True, max_length=max_length)
             input_ids = encoded.input_ids.to(device)
- 
+
             # Get embeddings
             outputs = encoder(input_ids)
             
-            # Convert to numpy and store
+            # Store all embeddings in memory
             batch_embeddings = outputs.cpu().numpy()
-            
-            # Save each embedding as an npz file
-            for j, embedding in enumerate(batch_embeddings):
-                idx = i + j
-                vector_filename = f"vector_{idx}.npz"
-                vector_path = os.path.join(vector_dir, vector_filename)
-                np.savez_compressed(vector_path, embedding=embedding)
-                vector_paths.append(vector_filename)
-    
-    # Add column with paths to vector files
+            for embedding in batch_embeddings:
+                all_embeddings.append(embedding)
+
+    # Now that we have all embeddings in memory, prepare the dataframe columns
+    vector_paths = []
+
+    # Process file saving as a separate step
+    print("Saving embeddings to disk...")
+    for idx, embedding in tqdm(enumerate(all_embeddings), total=len(all_embeddings), desc="Saving vector files"):
+        # Generate filename
+        vector_filename = f"vector_{idx}.npz"
+        vector_path = os.path.join(vector_dir, vector_filename)
+        
+        # Save to npz
+        np.savez_compressed(vector_path, embedding=embedding)
+        
+        # Store filename
+        vector_paths.append(vector_filename)
+
+    # Add vector column to dataframe
     df['vector'] = vector_paths
-    
+
+    # Remove the old encoded_emoji_vector column if it exists
+    if 'encoded_emoji_vector' in df.columns:
+        df = df.drop(columns=['encoded_emoji_vector'])
+
     # Save to CSV
     df.to_csv(output_path, index=False)
     print(f"Encoded dataset saved to: {output_path}")
