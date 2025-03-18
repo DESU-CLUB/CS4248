@@ -66,6 +66,7 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
     
     # Initialize model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(device)
     encoder = LlamaEncoder(model_name).to(device)
     encoder.eval()
     
@@ -112,11 +113,6 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
     
     # Add column with paths to vector files
     df['vector'] = vector_paths
-    
-    # Keep the encoded_emoji_vector column for backward compatibility
-    encoded_strings = [np.array2string(np.load(os.path.join(vector_dir, path))['embedding'], 
-                       separator=',', precision=6)[1:-1] for path in vector_paths]
-    df['encoded_emoji_vector'] = encoded_strings
     
     # Save to CSV
     df.to_csv(output_path, index=False)
