@@ -39,6 +39,11 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
         print(f"Loading dataset from: {file_path}")
         df = pd.read_csv(file_path)
     
+    # Create directory for vector files if it doesn't exist
+    vector_dir = "datasets/vector_files"
+    os.makedirs(vector_dir, exist_ok=True)
+    print(f"Vector files will be stored in: {vector_dir}")
+    
     # Determine which columns contain text and emoji
     text_column = None
     emoji_column = None
@@ -79,11 +84,9 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
     else:
         print(f"Using provided maximum length: {max_length}")
     
-    # Create a new column for encoded vectors
-    encoded_vectors = []
-    
     # Process in batches
     with torch.no_grad():
+        vector_paths = []
         for i in tqdm(range(0, len(df), batch_size)):
             # Get batch of emojis
             batch_emojis = df[emoji_column].iloc[i:i+batch_size].tolist()
@@ -98,18 +101,27 @@ def encode_dataset(file_path, output_path=None, model_name="meta-llama/Llama-3.2
             
             # Convert to numpy and store
             batch_embeddings = outputs.cpu().numpy()
-            for embedding in batch_embeddings:
-                encoded_vectors.append(embedding)
+            
+            # Save each embedding as an npz file
+            for j, embedding in enumerate(batch_embeddings):
+                idx = i + j
+                vector_filename = f"vector_{idx}.npz"
+                vector_path = os.path.join(vector_dir, vector_filename)
+                np.savez_compressed(vector_path, embedding=embedding)
+                vector_paths.append(vector_filename)
     
-    # Convert list of numpy arrays to a list of strings (for CSV storage)
-    encoded_strings = [np.array2string(vec, separator=',', precision=6)[1:-1] for vec in encoded_vectors]
+    # Add column with paths to vector files
+    df['vector'] = vector_paths
     
-    # Add to dataframe
+    # Keep the encoded_emoji_vector column for backward compatibility
+    encoded_strings = [np.array2string(np.load(os.path.join(vector_dir, path))['embedding'], 
+                       separator=',', precision=6)[1:-1] for path in vector_paths]
     df['encoded_emoji_vector'] = encoded_strings
     
     # Save to CSV
     df.to_csv(output_path, index=False)
     print(f"Encoded dataset saved to: {output_path}")
+    print(f"Vector files saved to: {vector_dir}")
     
     return output_path
 
