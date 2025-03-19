@@ -7,6 +7,7 @@ from tqdm import tqdm
 from transformers import BertTokenizer
 from matplotlib import pyplot as plt
 from datasets import load_dataset
+from llama_encoder import LlamaEncoder
 import numpy as np
 torch.manual_seed(0) # for reproducibility
 torch.set_default_dtype(torch.float32)
@@ -42,7 +43,15 @@ batch_size = 100
 # dataset definition and preprocessing
 ds = load_dataset("KomeijiForce/Text2Emoji")
 X = ds["train"]['text']
-y = np.zeros_like(np.zeros((len(X),2048))) #ds["train"]['labels']
+y = ds['train']['emoji'] #ds["train"]['labels']
+label_encoder = LlamaEncoder("meta-llama/Meta-Llama-3.2-1B-Instruct")
+# Freeze the LlamaEncoder parameters to prevent training
+for param in label_encoder.parameters():
+    param.requires_grad = False
+
+# Ensure the encoder is in evaluation mode
+label_encoder.eval()
+print("LlamaEncoder has been frozen and set to evaluation mode")
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, random_state = 0)
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
@@ -76,11 +85,13 @@ for epoch in training_loop:
     for X_batch, y_batch in loader:
         X_batch = X_batch.to(device) 
         y_batch = y_batch.to(device)
+        with torch.no_grad():
+            processed_y_batch = label_encoder.encode(y_batch)
         optimizer.zero_grad()
         print(model(X_batch).shape)
-        print(y_batch.shape)
+        print(processed_y_batch.shape)
         assert 0
-        loss = loss_fn(model(X_batch), y_batch)
+        loss = loss_fn(model(X_batch), processed_y_batch)
         loss.backward()
         optimizer.step()     
     training_loop.set_postfix(loss = loss.item())
