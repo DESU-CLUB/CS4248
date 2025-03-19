@@ -159,3 +159,27 @@ with torch.no_grad():
     
     print(f"Train MSE: {avg_train_loss:.6f}")
     print(f"Test MSE: {avg_test_loss:.6f}")
+
+    # Save the trained model
+    # Save model locally
+    torch.save(model.state_dict(), 'trained_encoder_model.pt')
+    print("Model saved successfully to 'trained_encoder_model.pt'")
+    
+    # Save model to HuggingFace Hub
+    from huggingface_hub import HfApi
+    
+    # You may need to set your HF token first
+    # import os
+    # os.environ["HUGGINGFACE_TOKEN"] = "your_token_here"
+    
+    # Save the model to HuggingFace Hub
+    model_name = "trained-encoder-model"
+    api = HfApi()
+    api.upload_file(
+        path_or_fileobj="trained_encoder_model.pt",
+        path_in_repo="model.pt",
+        repo_id=f"{api.whoami()['name']}/{model_name}",
+        repo_type="model",
+        create_repo=True,
+    )
+    print(f"Model successfully uploaded to HuggingFace Hub: {api.whoami()['name']}/{model_name}")
