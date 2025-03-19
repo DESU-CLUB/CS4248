@@ -39,7 +39,7 @@ class Encoder(torch.nn.Module):
 
 epochs = 5
 lr = 1e-3
-batch_size = 256
+batch_size = 512
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
 label_encoder.to(device)
@@ -129,7 +129,7 @@ plt.show()
 
 model.eval()
 with torch.no_grad():
-    batch_size = 128
+    batch_size = 512
     train_losses = []
     test_losses = []
     
