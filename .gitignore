@@ -1,3 +1,6 @@
 .env
 .venv
 .pycache
+# Ignore all dataset metadata and vector directories
+datasets/*_metadata.json
+datasets/*_vectors/

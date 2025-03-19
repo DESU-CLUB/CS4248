@@ -208,8 +208,9 @@ def encode_dataset(
             accumulated_indices.extend(batch_indices)
 
             for vec in batch_embeddings:
-                flat_vec = vec.flatten().tolist()  # Flatten and convert to list
-                accumulated_vectors.append(flat_vec)
+                # Convert numpy array to list of lists
+                vec_list = vec.tolist()  # This converts the 2D numpy array to a list of lists
+                accumulated_vectors.append(vec_list)
 
             # Check if we've completed a large batch or reached the end
             reached_large_batch_end = (large_batch_idx != current_large_batch) or (
@@ -228,7 +229,8 @@ def encode_dataset(
                 # Create PyArrow arrays
                 indices_array = pa.array(accumulated_indices, pa.int64())
                 vectors_array = pa.array(
-                    accumulated_vectors, pa.list_(pa.float32(), vector_dimension)
+                    accumulated_vectors,
+                    pa.list_(pa.list_(pa.float32()))
                 )
 
                 # Build table
@@ -310,9 +312,11 @@ def encode_dataset(
                 text_column: {"dtype": "string", "_type": "Value"},
                 emoji_column: {"dtype": "string", "_type": "Value"},
                 "embedding": {
-                    "feature": {"dtype": "float32", "_type": "Value"},
+                    "feature": {
+                        "feature": {"dtype": "float32", "_type": "Value"},
+                        "_type": "Sequence",
+                    },
                     "_type": "Sequence",
-                    "length": vector_dimension,
                 },
             },
             "supervised_keys": None,
