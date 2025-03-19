@@ -37,9 +37,9 @@ class Encoder(torch.nn.Module):
         x = self.transformer_enc(x).permute(1, 0, 2) # (seq_len, batch, embed_size) -> (batch, seq_len, embed_size)
         return self.pred(x.mean(dim=1)).squeeze(1) # (batch, seq_len, embed_size) -> (batch)
 
-epochs = 100
+epochs = 5
 lr = 1e-3
-batch_size = 100
+batch_size = 256
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
 label_encoder.to(device)
@@ -115,8 +115,8 @@ for epoch in training_loop:
         with torch.no_grad():
             y_batch = label_encoder(y_batch)
             y_batch = y_batch.mean(dim=1)
-        print(model(X_batch).shape)
-        print(y_batch.shape)
+        #print(model(X_batch).shape)
+        #print(y_batch.shape)
         #assert 0
         loss = loss_fn(model(X_batch), y_batch)
         loss.backward()
@@ -129,10 +129,33 @@ plt.show()
 
 model.eval()
 with torch.no_grad():
-    y_train_pred = model(torch.tensor(X_train_tokenized['input_ids'][:128], dtype=torch.long).to(device))
-    y_test_pred = model(torch.tensor(X_test_tokenized['input_ids'][:128], dtype=torch.long).to(device))
-    y_train = y_train[:128].to(device)
-    y_test = y_test[:128].to(device)
-    y_train_pred = y_train_pred.to(device)
-    print("Train MSE: ", loss_fn(y_train_pred, label_encoder(y_train).mean(dim = 1)).item())
-    print("Test MSE: ", loss_fn(y_test_pred, label_encoder(y_test).mean(dim = 1)).item())
+    batch_size = 128
+    train_losses = []
+    test_losses = []
+    
+    # Process training data in batches
+    for i in range(0, len(X_train_tokenized['input_ids']), batch_size):
+        end_idx = min(i + batch_size, len(X_train_tokenized['input_ids']))
+        batch_input_ids = torch.tensor(X_train_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
+        batch_labels = y_train[i:end_idx].to(device)
+        
+        batch_pred = model(batch_input_ids)
+        batch_loss = loss_fn(batch_pred, label_encoder(batch_labels).mean(dim=1)).item()
+        train_losses.append(batch_loss)
+    
+    # Process test data in batches
+    for i in range(0, len(X_test_tokenized['input_ids']), batch_size):
+        end_idx = min(i + batch_size, len(X_test_tokenized['input_ids']))
+        batch_input_ids = torch.tensor(X_test_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
+        batch_labels = y_test[i:end_idx].to(device)
+        
+        batch_pred = model(batch_input_ids)
+        batch_loss = loss_fn(batch_pred, label_encoder(batch_labels).mean(dim=1)).item()
+        test_losses.append(batch_loss)
+    
+    # Calculate and print average losses
+    avg_train_loss = sum(train_losses) / len(train_losses)
+    avg_test_loss = sum(test_losses) / len(test_losses)
+    
+    print(f"Train MSE: {avg_train_loss:.6f}")
+    print(f"Test MSE: {avg_test_loss:.6f}")
