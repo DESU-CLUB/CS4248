@@ -4,9 +4,10 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import Embedding, TransformerEncoder, TransformerEncoderLayer, Linear
 from tqdm import tqdm
-from transformers import BertTokenizer
+from transformers import BertTokenizer, AutoTokenizer
 from matplotlib import pyplot as plt
 from datasets import load_dataset
+from torch.utils.data import Dataset
 from llama_encoder import LlamaEncoder
 import numpy as np
 torch.manual_seed(0) # for reproducibility
@@ -40,11 +41,8 @@ epochs = 100
 lr = 1e-3
 batch_size = 100
 
-# dataset definition and preprocessing
-ds = load_dataset("KomeijiForce/Text2Emoji")
-X = ds["train"]['text']
-y = ds['train']['emoji'] #ds["train"]['labels']
-label_encoder = LlamaEncoder("meta-llama/Meta-Llama-3.2-1B-Instruct")
+label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
+label_encoder.to(device)
 # Freeze the LlamaEncoder parameters to prevent training
 for param in label_encoder.parameters():
     param.requires_grad = False
@@ -53,29 +51,57 @@ for param in label_encoder.parameters():
 label_encoder.eval()
 print("LlamaEncoder has been frozen and set to evaluation mode")
 
+class EncoderDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
+
+    def __len__(self):
+        return len(self.X)
+    
+
+    def __getitem__(self, idx):
+        with torch.no_grad():
+            return torch.tensor(self.X[idx], dtype=torch.long), self.y[idx]
+            
+# dataset definition and preprocessing
+ds = load_dataset("KomeijiForce/Text2Emoji")
+X = ds["train"]['text']
+y = ds['train']['emoji'] #ds["train"]['labels']
+
+
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, random_state = 0)
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
-
+label_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+if label_tokenizer.pad_token is None:
+    label_tokenizer.pad_token = "<|finetune_right_pad_id|>"
 X_train = [str(x) for x in X_train]
 X_test = [str(x) for x in X_test]
 
+print("Tokenizing training data...")
 X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
+y_train = label_tokenizer(y_train, padding=True, truncation=True, return_tensors="pt").input_ids
+print("Tokenizing test data...")
 X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
+y_test = label_tokenizer(y_test, padding=True, truncation=True, return_tensors="pt").input_ids
 
 voc_size = tokenizer.vocab_size
 embed_size = 128
 num_heads = 8
 num_layers = 6
 
-train_dataset = TensorDataset(X_train_tokenized['input_ids'], 
-                              torch.tensor(y_train, dtype=torch.float32))
-test_dataset = TensorDataset(X_test_tokenized['input_ids'], 
-                              torch.tensor(y_test, dtype=torch.float32))
+train_dataset = EncoderDataset(X_train_tokenized['input_ids'], 
+                              y_train)
+test_dataset = EncoderDataset(X_test_tokenized['input_ids'], 
+                              y_test)
 
 model = Encoder(voc_size, embed_size, num_heads, num_layers, device).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,epochs)
 loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+print("Training dataset size: ", len(train_dataset))
+print("Test dataset size: ", len(test_dataset))
+print("Start training...")
 
 # train
 losses = []
@@ -85,13 +111,14 @@ for epoch in training_loop:
     for X_batch, y_batch in loader:
         X_batch = X_batch.to(device) 
         y_batch = y_batch.to(device)
-        with torch.no_grad():
-            processed_y_batch = label_encoder.encode(y_batch)
         optimizer.zero_grad()
+        with torch.no_grad():
+            y_batch = label_encoder(y_batch)
+            y_batch = y_batch.mean(dim=1)
         print(model(X_batch).shape)
-        print(processed_y_batch.shape)
-        assert 0
-        loss = loss_fn(model(X_batch), processed_y_batch)
+        print(y_batch.shape)
+        #assert 0
+        loss = loss_fn(model(X_batch), y_batch)
         loss.backward()
         optimizer.step()     
     training_loop.set_postfix(loss = loss.item())
@@ -102,7 +129,10 @@ plt.show()
 
 model.eval()
 with torch.no_grad():
-    y_train_pred = model(torch.tensor(X_train, dtype=torch.long).to(device))
-    y_test_pred = model(torch.tensor(X_test, dtype=torch.long).to(device))
-    print("Train MSE: ", loss_fn(y_train_pred, torch.tensor(y_train, dtype=torch.float32).to(device)).item())
-    print("Test MSE: ", loss_fn(y_test_pred, torch.tensor(y_test, dtype=torch.float32).to(device)).item())
+    y_train_pred = model(torch.tensor(X_train_tokenized['input_ids'][:128], dtype=torch.long).to(device))
+    y_test_pred = model(torch.tensor(X_test_tokenized['input_ids'][:128], dtype=torch.long).to(device))
+    y_train = y_train[:128].to(device)
+    y_test = y_test[:128].to(device)
+    y_train_pred = y_train_pred.to(device)
+    print("Train MSE: ", loss_fn(y_train_pred, label_encoder(y_train).mean(dim = 1)).item())
+    print("Test MSE: ", loss_fn(y_test_pred, label_encoder(y_test).mean(dim = 1)).item())
