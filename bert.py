@@ -26,7 +26,7 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 
 epochs = 5
 lr = 1e-3
-batch_size = 100
+batch_size = 50
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
 label_encoder.to(device)
@@ -38,6 +38,9 @@ for param in label_encoder.parameters():
 label_encoder.eval()
 print("LlamaEncoder has been frozen and set to evaluation mode")
 
+# Linear layer to match Llama output dimension with Bert
+proj_layer = torch.nn.Linear(2048, 768).to(device)
+
 class EncoderDataset(Dataset):
     def __init__(self, X, y):
         self.X = X
@@ -46,10 +49,9 @@ class EncoderDataset(Dataset):
     def __len__(self):
         return len(self.X)
     
-
     def __getitem__(self, idx):
         with torch.no_grad():
-            return torch.tensor(self.X[idx], dtype=torch.long), self.y[idx]
+            return self.X[idx].clone().detach(), self.y[idx]
             
 # dataset definition and preprocessing
 ds = load_dataset("KomeijiForce/Text2Emoji")
@@ -96,16 +98,22 @@ loss_fn = torch.nn.MSELoss()
 training_loop = tqdm(range(epochs))
 model.train() 
 for epoch in training_loop:
+    print('Epoch: ', epoch)
+    counter = 0
     for X_batch, y_batch in loader:
+        print('Batch: ', counter + 1, ' out of ', int(len(X_train)/batch_size))
+        counter += 1
         X_batch = X_batch.to(device) 
         y_batch = y_batch.to(device)
         optimizer.zero_grad()
         with torch.no_grad():
             y_batch = label_encoder(y_batch)
             y_batch = y_batch.mean(dim=1)
-        loss = loss_fn(model(X_batch), y_batch)
+            y_batch = proj_layer(y_batch)  # Project Llama output to match BERT dimensions
+        loss = loss_fn(model(X_batch).last_hidden_state.mean(dim=1), y_batch)
         loss.backward()
-        optimizer.step()     
+        optimizer.step()
+        torch.mps.empty_cache()     
     training_loop.set_postfix(loss = loss.item())
     scheduler.step()
     losses.append(loss.item())
@@ -114,7 +122,6 @@ plt.show()
 
 model.eval()
 with torch.no_grad():
-    batch_size = 512
     train_losses = []
     test_losses = []
     
@@ -124,9 +131,10 @@ with torch.no_grad():
         batch_input_ids = torch.tensor(X_train_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
         batch_labels = y_train[i:end_idx].to(device)
         
-        batch_pred = model(batch_input_ids)
-        batch_loss = loss_fn(batch_pred, label_encoder(batch_labels).mean(dim=1)).item()
+        batch_pred = model(batch_input_ids).last_hidden_state.mean(dim=1)
+        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).last_hidden_state.mean(dim=1))).item()
         train_losses.append(batch_loss)
+        torch.mps.empty_cache()
     
     # Process test data in batches
     for i in range(0, len(X_test_tokenized['input_ids']), batch_size):
@@ -134,9 +142,10 @@ with torch.no_grad():
         batch_input_ids = torch.tensor(X_test_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
         batch_labels = y_test[i:end_idx].to(device)
         
-        batch_pred = model(batch_input_ids)
-        batch_loss = loss_fn(batch_pred, label_encoder(batch_labels).mean(dim=1)).item()
+        batch_pred = model(batch_input_ids).last_hidden_state.mean(dim=1)
+        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).last_hidden_state.mean(dim=1))).item()
         test_losses.append(batch_loss)
+        torch.mps.empty_cache()
     
     # Calculate and print average losses
     avg_train_loss = sum(train_losses) / len(train_losses)
