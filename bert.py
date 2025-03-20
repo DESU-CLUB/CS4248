@@ -26,7 +26,7 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 
 epochs = 5
 lr = 1e-3
-batch_size = 512
+batch_size = 100
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
 label_encoder.to(device)
@@ -62,8 +62,8 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 label_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
 if label_tokenizer.pad_token is None:
     label_tokenizer.pad_token = "<|finetune_right_pad_id|>"
-#X_train = [str(x) for x in X_train]
-#X_test = [str(x) for x in X_test]
+X_train = [str(x) for x in X_train]
+X_test = [str(x) for x in X_test]
 
 print("Tokenizing training data...")
 X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
