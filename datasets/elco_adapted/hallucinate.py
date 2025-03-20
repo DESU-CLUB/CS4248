@@ -57,7 +57,7 @@ def format_csv():
     df = pd.read_csv("ELCo_with_sentences.csv")
 
     # Select only the "generated_sentence" and "EM" columns
-    filtered_df = df[["generated_sentence", "EM"]].rename(columns={"generated_sentence": "text"})
+    filtered_df = df[["generated_sentence", "EM"]].rename(columns={"generated_sentence": "text"}).rename(columns={"EM": "emoji"})
 
     # Save the new CSV file
     filtered_df.to_csv("ELCo_adapted.csv", index=False)
