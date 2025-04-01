@@ -36,6 +36,11 @@ class Encoder(torch.nn.Module):
         x = self.emb(x).permute(1, 0, 2) # (batch, seq_len) -> (seq_len, batch, embed_size)
         x = self.transformer_enc(x).permute(1, 0, 2) # (seq_len, batch, embed_size) -> (batch, seq_len, embed_size)
         return self.pred(x.mean(dim=1)).squeeze(1) # (batch, seq_len, embed_size) -> (batch)
+
+    def freeze_encoder(self):
+        for param in self.parameters():
+            param.requires_grad = False
+        
 def train_encoder():       
 
     epochs = 5
