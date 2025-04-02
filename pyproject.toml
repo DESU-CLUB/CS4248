@@ -14,8 +14,10 @@ dependencies = [
   "modal>=0.73.100",
   "peft>=0.14.0",
   "python-dotenv>=1.0.1",
+  "scikit-learn>=1.6.1",
   "transformers>=4.49.0",
   "trl>=0.15.2",
+  "wandb>=0.19.8",
 ]
 
 [project.optional-dependencies]
