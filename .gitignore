@@ -4,3 +4,4 @@
 # Ignore all dataset metadata and vector directories
 datasets/*_metadata.json
 datasets/*_vectors/
+trained_decoder_model.pt
