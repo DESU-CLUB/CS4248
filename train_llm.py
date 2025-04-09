@@ -6,6 +6,7 @@ import datasets
 import torch
 import torch.nn as nn
 import wandb
+import os
 
 
 # Configuration dictionaries for model parameters
@@ -294,16 +295,27 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
         else:
             print(f"Epoch: {epoch+1}/{epochs}, No valid tokens processed")
         
-        # Save model checkpoint
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': epoch_loss / max(1, total_tokens),
-        }, f"emoji_llm_checkpoint_epoch_{epoch+1}.pt")
+        # No checkpoint saving during training - only save at the end
     
-    # Save final model
-    torch.save(model.state_dict(), "trained_full_emoji_llm.pt")
+    # Create checkpoints directory if it doesn't exist
+    os.makedirs("checkpoints", exist_ok=True)
+    
+    # Save final model with error handling
+    try:
+        torch.save(model.state_dict(), "checkpoints/trained_full_emoji_llm.pt", _use_new_zipfile_serialization=False)
+        print("Successfully saved final model")
+    except Exception as e:
+        print(f"Error saving final model: {e}")
+        try:
+            # Try alternative saving approach
+            print("Trying alternative saving approach...")
+            cpu_model = model.to("cpu")
+            torch.save(cpu_model.state_dict(), "checkpoints/trained_full_emoji_llm_cpu.pt", _use_new_zipfile_serialization=False)
+            model = model.to(device)  # Move model back to original device
+            print("Successfully saved final model using alternative approach")
+        except Exception as e2:
+            print(f"All saving attempts failed: {e2}")
+            
     wandb.finish()
     
     return model
@@ -352,6 +364,7 @@ if __name__ == "__main__":
     full_model.encoder.eval()  # Set encoder to evaluation mode
     full_model.llm.train()     # Set LLM to training mode
     full_model.decoder.train() # Set decoder to training mode
+    full_model.compile()
     
     ds = datasets.load_dataset("roneneldan/TinyStories")
     train_data = ds["train"]
