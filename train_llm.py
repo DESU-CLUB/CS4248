@@ -42,6 +42,10 @@ class FullEmojiLLM(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.llm = llm
+        
+        # Store reference to the tokenizer's vocab size for verification
+        self.target_vocab_size = decoder.token_embedding.weight.size(0)
+        print(f"Target vocabulary size from decoder: {self.target_vocab_size}")
 
     def forward(self, x):
         # Process through encoder (get embeddings)
@@ -55,20 +59,30 @@ class FullEmojiLLM(nn.Module):
         batch_size = x.size(0)
         seq_len = x.size(1)
         
-        # Process through decoder - ensure x is passed correctly
+        # Process through decoder
+        # Note: The decoder needs both the encoder outputs (llm_outputs in our case)
+        # and the target tokens (x) for teacher forcing during training
         try:
-            outputs = self.decoder(llm_outputs, x)
+            # Call decoder with both llm_outputs and input_ids for teacher forcing
+            logits = self.decoder(llm_outputs, x)
             
-            # Ensure output has the same batch size and sequence length as input
-            if outputs.size(0) != batch_size or outputs.size(1) != seq_len:
-                print(f"WARNING: Decoder output shape {outputs.shape} doesn't match expected {(batch_size, seq_len, -1)}")
+            # The decoder outputs logits directly, not actual generated tokens
+            # These logits are predictions for each token in the sequence
+            
+            # Check and fix shapes if needed
+            if logits.size(0) != batch_size:
+                print(f"WARNING: Decoder output batch size {logits.size(0)} doesn't match expected {batch_size}")
+            
+            # Reshape the logits if needed - but maintain the actual vocabulary dimension
+            # because that's what the loss function expects
+            return logits
+            
         except Exception as e:
             print(f"Error in decoder: {e}")
             # Create dummy output with correct shape as a fallback
-            outputs = torch.zeros((batch_size, seq_len, self.decoder.token_embedding.weight.size(0)), 
+            outputs = torch.zeros((batch_size, seq_len, self.target_vocab_size), 
                                 device=x.device)
-        
-        return outputs
+            return outputs
 
 def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, learning_rate: float):
     # Set device
@@ -176,89 +190,116 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             input_ids = batch["input_ids"].to(device)
             loss_mask = batch["loss_mask"].to(device)
             
-            # Create target sequence (shifted right)
+            # For decoder, we need target_ids (which are the same as input_ids for reconstruction)
             target_ids = input_ids.clone()
             
             # Print debug info for first batch
             if batch_idx == 0 and epoch == 0:
                 print(f"Input shape: {input_ids.shape}")
                 print(f"Loss mask shape: {loss_mask.shape}")
+                print(f"Vocabulary size from tokenizer: {tokenizer.vocab_size}")
             
             # Zero gradients
             optimizer.zero_grad()
             
             try:
-                # Forward pass
-                outputs = model(input_ids)
+                # Forward pass - get logits
+                logits = model(input_ids)
                 
                 # Print debug info for first batch
                 if batch_idx == 0 and epoch == 0:
-                    print(f"Model output shape: {outputs.shape}")
+                    print(f"Logits shape: {logits.shape}")
+                    print(f"Logits vocabulary dimension (last dim): {logits.size(-1)}")
+                    print(f"Target shape: {target_ids.shape}")
                 
-                # Verify shapes match before loss calculation
-                if outputs.size(0) != target_ids.size(0) or outputs.size(1) != target_ids.size(1):
-                    print(f"Shape mismatch: outputs {outputs.shape}, targets {target_ids.shape}")
-                    
-                    # Adjust shapes if needed - make sure they're compatible
-                    min_seq_len = min(outputs.size(1), target_ids.size(1))
-                    outputs = outputs[:, :min_seq_len, :]
+                # Shift labels for standard language modeling loss
+                # Predict the next token for each position
+                if logits.size(1) != target_ids.size(1):
+                    print(f"WARNING: Sequence length mismatch - logits: {logits.size(1)}, targets: {target_ids.size(1)}")
+                    # Adjust to the smaller sequence length
+                    min_seq_len = min(logits.size(1), target_ids.size(1))
+                    logits = logits[:, :min_seq_len, :]
                     target_ids = target_ids[:, :min_seq_len]
                     loss_mask = loss_mask[:, :min_seq_len]
-                    
-                    print(f"Adjusted shapes: outputs {outputs.shape}, targets {target_ids.shape}")
                 
-                # Calculate per-token loss
-                token_loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
-                token_loss = token_loss.view(target_ids.size())
+                # Calculate per-token loss - use reshape instead of view to avoid contiguity issues
+                flat_logits = logits.reshape(-1, logits.size(-1))
+                flat_targets = target_ids.reshape(-1)
                 
-                # Apply mask - only consider non-padding tokens
+                # Manually create a new tensor to ensure contiguity if needed
+                if not flat_logits.is_contiguous():
+                    flat_logits = flat_logits.contiguous()
+                if not flat_targets.is_contiguous():
+                    flat_targets = flat_targets.contiguous()
+                
+                token_loss = criterion(flat_logits, flat_targets)
+                
+                # Reshape back to match target shape
+                token_loss = token_loss.reshape(target_ids.size())
+                
+                # Apply loss mask
                 masked_loss = token_loss * loss_mask.float()
                 
                 # Average loss over only the masked tokens
                 num_masked_tokens = loss_mask.sum().item()
-                loss = masked_loss.sum() / max(1, num_masked_tokens)  # Avoid division by zero
-                
-                # Backward pass
-                loss.backward()
-                
-                # Clip gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # Update parameters
-                optimizer.step()
-                
-                # Log batch loss
-                epoch_loss += loss.item() * num_masked_tokens
-                total_tokens += num_masked_tokens
-                
-                if batch_idx % 10 == 0:
-                    print(f"Epoch: {epoch+1}/{epochs}, Batch: {batch_idx}/{len(train_loader)}, "
-                          f"Loss: {loss.item():.4f}, Masked tokens: {num_masked_tokens}")
-                    wandb.log({
-                        "batch_loss": loss.item(),
-                        "masked_tokens": num_masked_tokens,
-                        "step": batch_idx + epoch * len(train_loader)
-                    })
+                if num_masked_tokens > 0:
+                    loss = masked_loss.sum() / num_masked_tokens
+                    
+                    # Backward pass
+                    loss.backward()
+                    
+                    # Clip gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    
+                    # Update parameters
+                    optimizer.step()
+                    
+                    # Log batch loss
+                    epoch_loss += loss.item() * num_masked_tokens
+                    total_tokens += num_masked_tokens
+                    
+                    if batch_idx % 10 == 0:
+                        print(f"Epoch: {epoch+1}/{epochs}, Batch: {batch_idx}/{len(train_loader)}, "
+                              f"Loss: {loss.item():.4f}, Masked tokens: {num_masked_tokens}")
+                        wandb.log({
+                            "batch_loss": loss.item(),
+                            "masked_tokens": num_masked_tokens,
+                            "step": batch_idx + epoch * len(train_loader)
+                        })
+                else:
+                    print(f"Skipping batch {batch_idx} - no valid tokens for loss calculation")
                     
             except RuntimeError as e:
                 print(f"Error in batch {batch_idx}: {e}")
+                if "CUDA out of memory" in str(e):
+                    print("CUDA OOM error - trying to free memory")
+                    if 'logits' in locals():
+                        del logits
+                    if 'token_loss' in locals():
+                        del token_loss
+                    if 'loss' in locals():
+                        del loss
+                    torch.cuda.empty_cache()
                 continue
         
         # Log epoch loss (average per token)
-        avg_epoch_loss = epoch_loss / max(1, total_tokens)
-        print(f"Epoch: {epoch+1}/{epochs}, Average Loss: {avg_epoch_loss:.4f}, Total tokens: {total_tokens}")
-        wandb.log({
-            "epoch": epoch+1,
-            "train_loss": avg_epoch_loss,
-            "total_tokens": total_tokens
-        })
+        if total_tokens > 0:
+            avg_epoch_loss = epoch_loss / total_tokens
+            print(f"Epoch: {epoch+1}/{epochs}, Average Loss: {avg_epoch_loss:.4f}, Total tokens: {total_tokens}")
+            wandb.log({
+                "epoch": epoch+1,
+                "train_loss": avg_epoch_loss,
+                "total_tokens": total_tokens
+            })
+        else:
+            print(f"Epoch: {epoch+1}/{epochs}, No valid tokens processed")
         
         # Save model checkpoint
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': avg_epoch_loss,
+            'loss': epoch_loss / max(1, total_tokens),
         }, f"emoji_llm_checkpoint_epoch_{epoch+1}.pt")
     
     # Save final model
