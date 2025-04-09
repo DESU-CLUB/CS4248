@@ -191,14 +191,31 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             input_ids = batch["input_ids"].to(device)
             loss_mask = batch["loss_mask"].to(device)
             
-            # For decoder, we need target_ids (which are the same as input_ids for reconstruction)
-            target_ids = input_ids[:, 1:].clone()
+            # Debug initial shapes
+            print(f"[Batch {batch_idx}] Initial input_ids shape: {input_ids.shape}")
             
-            # Print debug info for first batch
-            if batch_idx == 0 and epoch == 0:
-                print(f"Input shape: {input_ids.shape}")
-                print(f"Loss mask shape: {loss_mask.shape}")
-                print(f"Vocabulary size from tokenizer: {tokenizer.vocab_size}")
+            # For decoder, we need target_ids shifted by one position
+            # This creates the autoregressive target where we predict the next token
+            if input_ids.size(1) > 1:  # Make sure we have enough tokens
+                target_ids = input_ids[:, 1:].clone()  # Remove first token (BOS token)
+                # Also slice the loss mask to match the target_ids shape
+                loss_mask = loss_mask[:, 1:].clone()
+            else:
+                # Handle edge case with very short sequences
+                print("WARNING: Sequence too short for proper slicing")
+                target_ids = input_ids.clone()
+            
+            # Print debug info for first batch of each epoch
+            if batch_idx == 0:
+                print(f"[Epoch {epoch+1}] After slicing:")
+                print(f"  input_ids shape: {input_ids.shape}")
+                print(f"  target_ids shape: {target_ids.shape}")
+                print(f"  loss_mask shape: {loss_mask.shape}")
+                if epoch == 0:
+                    print(f"  Vocabulary size from tokenizer: {tokenizer.vocab_size}")
+                    # Show a sample of the data
+                    print(f"  Sample token IDs (input): {input_ids[0, :10]}")
+                    print(f"  Sample token IDs (target): {target_ids[0, :10]}")
             
             # Zero gradients
             optimizer.zero_grad()
@@ -207,25 +224,35 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
                 # Forward pass - get logits
                 logits = model(input_ids)
                 
-                # Print debug info for first batch
-                if batch_idx == 0 and epoch == 0:
-                    print(f"Logits shape: {logits.shape}")
-                    print(f"Logits vocabulary dimension (last dim): {logits.size(-1)}")
-                    print(f"Target shape: {target_ids.shape}")
+                # Print shape debugging
+                if batch_idx == 0:
+                    print(f"[Epoch {epoch+1}] After forward pass:")
+                    print(f"  logits shape: {logits.shape}")
+                    print(f"  target_ids shape: {target_ids.shape}")
                 
-                # Shift labels for standard language modeling loss
-                # Predict the next token for each position
+                # Check if logits and target shapes match
                 if logits.size(1) != target_ids.size(1):
                     print(f"WARNING: Sequence length mismatch - logits: {logits.size(1)}, targets: {target_ids.size(1)}")
-                    # Adjust to the smaller sequence length
+                    
+                    # Adjust shapes to match
                     min_seq_len = min(logits.size(1), target_ids.size(1))
-                    logits = logits[:, :min_seq_len, :]
-                    target_ids = target_ids[:, :min_seq_len]
-                    loss_mask = loss_mask[:, :min_seq_len]
+                    if logits.size(1) > min_seq_len:
+                        logits = logits[:, :min_seq_len, :]
+                        print(f"  Truncated logits to shape: {logits.shape}")
+                    if target_ids.size(1) > min_seq_len:
+                        target_ids = target_ids[:, :min_seq_len]
+                        loss_mask = loss_mask[:, :min_seq_len]
+                        print(f"  Truncated targets to shape: {target_ids.shape}")
                 
                 # Calculate per-token loss - use reshape instead of view to avoid contiguity issues
                 flat_logits = logits.reshape(-1, logits.size(-1))
                 flat_targets = target_ids.reshape(-1)
+                
+                # Print final shapes for loss calculation
+                if batch_idx == 0 and epoch == 0:
+                    print(f"Loss calculation shapes:")
+                    print(f"  flat_logits: {flat_logits.shape}")
+                    print(f"  flat_targets: {flat_targets.shape}")
                 
                 # Manually create a new tensor to ensure contiguity if needed
                 if not flat_logits.is_contiguous():
@@ -364,7 +391,6 @@ if __name__ == "__main__":
     full_model.encoder.eval()  # Set encoder to evaluation mode
     full_model.llm.train()     # Set LLM to training mode
     full_model.decoder.train() # Set decoder to training mode
-    full_model.compile()
     
     ds = datasets.load_dataset("roneneldan/TinyStories")
     train_data = ds["train"]
