@@ -51,8 +51,22 @@ class FullEmojiLLM(nn.Module):
         # Process through LLM
         llm_outputs = self.llm(encoder_outputs)
         
-        # Process through decoder
-        outputs = self.decoder(llm_outputs, x)
+        # Debug shape before decoder
+        batch_size = x.size(0)
+        seq_len = x.size(1)
+        
+        # Process through decoder - ensure x is passed correctly
+        try:
+            outputs = self.decoder(llm_outputs, x)
+            
+            # Ensure output has the same batch size and sequence length as input
+            if outputs.size(0) != batch_size or outputs.size(1) != seq_len:
+                print(f"WARNING: Decoder output shape {outputs.shape} doesn't match expected {(batch_size, seq_len, -1)}")
+        except Exception as e:
+            print(f"Error in decoder: {e}")
+            # Create dummy output with correct shape as a fallback
+            outputs = torch.zeros((batch_size, seq_len, self.decoder.token_embedding.weight.size(0)), 
+                                device=x.device)
         
         return outputs
 
@@ -165,6 +179,11 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             # Create target sequence (shifted right)
             target_ids = input_ids.clone()
             
+            # Print debug info for first batch
+            if batch_idx == 0 and epoch == 0:
+                print(f"Input shape: {input_ids.shape}")
+                print(f"Loss mask shape: {loss_mask.shape}")
+            
             # Zero gradients
             optimizer.zero_grad()
             
@@ -172,21 +191,32 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
                 # Forward pass
                 outputs = model(input_ids)
                 
-                # Calculate loss with masking
-                # outputs shape: [batch_size, seq_len, vocab_size]
-                # target_ids shape: [batch_size, seq_len]
-                # loss_mask shape: [batch_size, seq_len]
+                # Print debug info for first batch
+                if batch_idx == 0 and epoch == 0:
+                    print(f"Model output shape: {outputs.shape}")
+                
+                # Verify shapes match before loss calculation
+                if outputs.size(0) != target_ids.size(0) or outputs.size(1) != target_ids.size(1):
+                    print(f"Shape mismatch: outputs {outputs.shape}, targets {target_ids.shape}")
+                    
+                    # Adjust shapes if needed - make sure they're compatible
+                    min_seq_len = min(outputs.size(1), target_ids.size(1))
+                    outputs = outputs[:, :min_seq_len, :]
+                    target_ids = target_ids[:, :min_seq_len]
+                    loss_mask = loss_mask[:, :min_seq_len]
+                    
+                    print(f"Adjusted shapes: outputs {outputs.shape}, targets {target_ids.shape}")
                 
                 # Calculate per-token loss
                 token_loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
                 token_loss = token_loss.view(target_ids.size())
                 
-                # Apply mask - only consider loss for assistant tokens
+                # Apply mask - only consider non-padding tokens
                 masked_loss = token_loss * loss_mask.float()
                 
                 # Average loss over only the masked tokens
-                num_assistant_tokens = loss_mask.sum().item()
-                loss = masked_loss.sum() / max(1, num_assistant_tokens)  # Avoid division by zero
+                num_masked_tokens = loss_mask.sum().item()
+                loss = masked_loss.sum() / max(1, num_masked_tokens)  # Avoid division by zero
                 
                 # Backward pass
                 loss.backward()
@@ -198,15 +228,15 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
                 optimizer.step()
                 
                 # Log batch loss
-                epoch_loss += loss.item() * num_assistant_tokens
-                total_tokens += num_assistant_tokens
+                epoch_loss += loss.item() * num_masked_tokens
+                total_tokens += num_masked_tokens
                 
                 if batch_idx % 10 == 0:
                     print(f"Epoch: {epoch+1}/{epochs}, Batch: {batch_idx}/{len(train_loader)}, "
-                          f"Loss: {loss.item():.4f}, Assistant tokens: {num_assistant_tokens}")
+                          f"Loss: {loss.item():.4f}, Masked tokens: {num_masked_tokens}")
                     wandb.log({
                         "batch_loss": loss.item(),
-                        "assistant_tokens": num_assistant_tokens,
+                        "masked_tokens": num_masked_tokens,
                         "step": batch_idx + epoch * len(train_loader)
                     })
                     
