@@ -297,6 +297,6 @@ if __name__ == "__main__":
     full_model = FullEmojiLLM(encoder, decoder, llm)
 
     ds = datasets.load_dataset("bespokelabs/Bespoke-Stratos-17k")
-    train_data = ds["train"]["text"]    
+    train_data = ds["train"]    
     # Train the model
     train_llm(full_model, train_data,  training_config["epochs"], training_config["batch_size"], training_config["learning_rate"])
