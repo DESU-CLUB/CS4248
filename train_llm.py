@@ -73,7 +73,7 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
     
     # Create a custom dataset class for the conversation format
     class ConversationDataset(torch.utils.data.Dataset):
-        def __init__(self, dataset, tokenizer, max_length=512):
+        def __init__(self, dataset, tokenizer, max_length=256):
             self.dataset = dataset
             self.tokenizer = tokenizer
             self.max_length = max_length
@@ -263,6 +263,7 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
 if __name__ == "__main__":
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     
     # Load tokenizer to get vocabulary size
     tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
@@ -274,7 +275,8 @@ if __name__ == "__main__":
     
     # Load encoder state dict
     encoder_state_dict = torch.hub.load_state_dict_from_url(
-        "https://huggingface.co/DESUCLUB/emoji_encoder_elco/resolve/main/trained_encoder_model.pt"
+        "https://huggingface.co/DESUCLUB/emoji_encoder_elco/resolve/main/trained_encoder_model.pt", 
+        map_location=device
     )
     
     # Initialize encoder with config parameters
@@ -283,20 +285,51 @@ if __name__ == "__main__":
     
     # Load decoder state dict
     decoder_state_dict = torch.hub.load_state_dict_from_url(
-        "https://huggingface.co/DESUCLUB/emoji_decoder_elco/resolve/main/trained_decoder_model.pt"
+        "https://huggingface.co/DESUCLUB/emoji_decoder_elco/resolve/main/trained_decoder_model.pt",
+        map_location=device
     )
     
     # Initialize decoder with config parameters
     decoder = CustomDecoder(**decoder_config).to(device)
     decoder.load_state_dict(decoder_state_dict)
     
-    # Initialize LLM
-    llm = EmojiLLM(model_name="gpt2", hidden_size=2048)
+    # Initialize LLM and move to device
+    llm = EmojiLLM(model_name="gpt2", hidden_size=2048).to(device)
     
     # Create the full model
-    full_model = FullEmojiLLM(encoder, decoder, llm)
-
-    ds = datasets.load_dataset("bespokelabs/Bespoke-Stratos-17k")
-    train_data = ds["train"]    
+    full_model = FullEmojiLLM(encoder, decoder, llm).to(device)
+    
+    # Make sure the model is in the correct mode for each part
+    full_model.encoder.eval()  # Set encoder to evaluation mode
+    full_model.llm.train()     # Set LLM to training mode
+    full_model.decoder.train() # Set decoder to training mode
+    
+    ds = datasets.load_dataset("roneneldan/TinyStories")
+    train_data = ds["train"]
+    
+    # Filter out examples that are too long
+    # Calculate approximately how many tokens each example would be
+    def estimate_token_count(example):
+        # Rough estimate based on whitespace tokenization plus some overhead
+        system_len = len(example["system"].split())
+        convo_len = sum(len(turn["value"].split()) for turn in example["conversations"])
+        return system_len + convo_len
+    
+    # Print dataset stats before filtering
+    total_examples = len(train_data)
+    print(f"Total examples before filtering: {total_examples}")
+    
+    # Optional: Filter out examples estimated to be too long
+    max_estimated_tokens = 200  # Conservative estimate
+    filtered_indices = [i for i, example in enumerate(train_data) 
+                        if estimate_token_count(example) <= max_estimated_tokens]
+    if len(filtered_indices) < total_examples:
+        train_data = train_data.select(filtered_indices)
+        print(f"Filtered to {len(train_data)} examples (removed {total_examples - len(train_data)} long examples)")
+    
+    # Sample a small subset for testing if needed
+    # train_data = train_data.select(range(min(1000, len(train_data))))
+    
     # Train the model
-    train_llm(full_model, train_data,  training_config["epochs"], training_config["batch_size"], training_config["learning_rate"])
+    train_llm(full_model, train_data, training_config["epochs"], 
+             training_config["batch_size"], training_config["learning_rate"])
