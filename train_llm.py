@@ -71,8 +71,8 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
     }
     tokenizer.add_special_tokens({"pad_token": special_tokens["pad_token"]})
     
-    # Create a custom dataset class for the conversation format
-    class ConversationDataset(torch.utils.data.Dataset):
+    # Create a custom dataset class for simple text (TinyStories format)
+    class TextDataset(torch.utils.data.Dataset):
         def __init__(self, dataset, tokenizer, max_length=256):
             self.dataset = dataset
             self.tokenizer = tokenizer
@@ -82,38 +82,18 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             return len(self.dataset)
             
         def __getitem__(self, idx):
-            example = self.dataset[idx]
-            system_prompt = example["system"]
-            conversations = example["conversations"]
+            # Get text from the dataset - TinyStories has a "text" field
+            try:
+                text = self.dataset[idx]["text"]
+            except KeyError:
+                # Fallback to first column if "text" doesn't exist
+                text = self.dataset[idx][next(iter(self.dataset[idx]))]
             
-            # Format the conversation as a single text with special tokens
-            formatted_text = f"[BOS] {system_prompt} "
+            # Add special tokens
+            formatted_text = f"[BOS] {text} [EOS]"
             
-            # Track positions of user vs assistant content for loss masking
-            is_assistant_token = []  # 1 for assistant tokens, 0 for system/user tokens
-            
-            # Initial tokens are system prompt (not assistant)
-            system_tokens = len(self.tokenizer.encode(formatted_text)) - 1  # -1 for BOS
-            is_assistant_token.extend([0] * system_tokens)
-            
-            for turn in conversations:
-                role = turn["from"]
-                content = turn["value"]
-                
-                if role.lower() == "user":
-                    formatted_text += f"[USER] {content} "
-                    # Add user tokens to the mask (not used for loss)
-                    user_tokens = len(self.tokenizer.encode(f"[USER] {content} ")) - 1  # -1 for special token
-                    is_assistant_token.extend([0] * user_tokens)
-                else:  # assistant
-                    formatted_text += f"[ASSISTANT] {content} "
-                    # Add assistant tokens to the mask (used for loss)
-                    assistant_tokens = len(self.tokenizer.encode(f"[ASSISTANT] {content} ")) - 1
-                    is_assistant_token.extend([1] * assistant_tokens)
-            
-            # Add EOS token
-            formatted_text += "[EOS]"
-            is_assistant_token.append(0)  # EOS token is not used for loss
+            # All tokens are used for loss calculation since it's a simple text generation task
+            # without any masking needed
             
             # Tokenize
             encoding = self.tokenizer(
@@ -126,11 +106,9 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             
             input_ids = encoding["input_ids"].squeeze(0)
             
-            # Create loss mask (1 for tokens we want to calculate loss on - assistant tokens)
-            # Pad to match the sequence length
-            loss_mask = torch.tensor(is_assistant_token[:self.max_length] + 
-                                    [0] * max(0, self.max_length - len(is_assistant_token)),
-                                    dtype=torch.bool)
+            # For simple text generation, we train on all tokens except padding
+            # Create mask where 1 = calculate loss, 0 = ignore (padding)
+            loss_mask = (input_ids != tokenizer.pad_token_id)
             
             return {
                 "input_ids": input_ids,
@@ -138,7 +116,7 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             }
     
     # Create dataset and dataloader
-    train_dataset = ConversationDataset(train_data, tokenizer)
+    train_dataset = TextDataset(train_data, tokenizer)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, 
         batch_size=batch_size, 
@@ -308,12 +286,14 @@ if __name__ == "__main__":
     train_data = ds["train"]
     
     # Filter out examples that are too long
-    # Calculate approximately how many tokens each example would be
     def estimate_token_count(example):
-        # Rough estimate based on whitespace tokenization plus some overhead
-        system_len = len(example["system"].split())
-        convo_len = sum(len(turn["value"].split()) for turn in example["conversations"])
-        return system_len + convo_len
+        # Rough estimate based on whitespace tokenization plus overhead
+        try:
+            text = example["text"]
+        except KeyError:
+            # Fallback to first column if "text" doesn't exist
+            text = example[next(iter(example))]
+        return len(text.split())
     
     # Print dataset stats before filtering
     total_examples = len(train_data)
@@ -322,13 +302,15 @@ if __name__ == "__main__":
     # Optional: Filter out examples estimated to be too long
     max_estimated_tokens = 200  # Conservative estimate
     filtered_indices = [i for i, example in enumerate(train_data) 
-                        if estimate_token_count(example) <= max_estimated_tokens]
+                         if estimate_token_count(example) <= max_estimated_tokens]
+    
     if len(filtered_indices) < total_examples:
         train_data = train_data.select(filtered_indices)
         print(f"Filtered to {len(train_data)} examples (removed {total_examples - len(train_data)} long examples)")
     
     # Sample a small subset for testing if needed
-    # train_data = train_data.select(range(min(1000, len(train_data))))
+    train_data = train_data.select(range(min(10, len(train_data))))
+    print(f"Using {len(train_data)} examples for training")
     
     # Train the model
     train_llm(full_model, train_data, training_config["epochs"], 
