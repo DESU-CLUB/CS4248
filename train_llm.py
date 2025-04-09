@@ -1,12 +1,14 @@
 from llm import GPT2Adapter, EmojiLLM
 from encoder import Encoder
 from decoder import CustomDecoder
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
 import datasets
 import torch
 import torch.nn as nn
 import wandb
 import os
+import math
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
 
 # Configuration dictionaries for model parameters
@@ -158,11 +160,26 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
         }
     )
     
-    # Initialize optimizer - only train the LLM and decoder parts
+    # Initialize optimizer with weight decay
     optimizer = torch.optim.AdamW([
-        {'params': model.llm.parameters()}, 
-        {'params': model.decoder.parameters()}
-    ], lr=learning_rate)
+        {'params': model.llm.parameters(), 'weight_decay': 0.01}, 
+        {'params': model.decoder.parameters(), 'weight_decay': 0.01}
+    ], lr=learning_rate, betas=(0.9, 0.999), eps=1e-8)
+    
+    # Calculate total training steps for scheduler
+    total_steps = len(train_loader) * epochs
+    warmup_steps = len(train_loader)  # One epoch of warmup
+    
+    # Create a learning rate scheduler with warmup
+    def lr_lambda(current_step):
+        # Linear warmup for warmup_steps, then cosine decay
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        # Cosine annealing
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+    
+    scheduler = LambdaLR(optimizer, lr_lambda)
     
     # Initialize loss function - we'll apply our own masking
     criterion = nn.CrossEntropyLoss(reduction='none')
@@ -173,7 +190,11 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
         "learning_rate": learning_rate,
         "epochs": epochs,
         "batch_size": batch_size,
-        "model": "FullEmojiLLM"
+        "model": "FullEmojiLLM",
+        "warmup_steps": warmup_steps,
+        "weight_decay": 0.01,
+        "optimizer": "AdamW",
+        "scheduler": "Warmup + Cosine"
     })
     
     # Freeze encoder parameters
@@ -182,6 +203,9 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
     
     # Training loop
     model.train()
+    global_step = 0
+    best_loss = float('inf')
+    
     for epoch in range(epochs):
         epoch_loss = 0.0
         total_tokens = 0
@@ -282,17 +306,23 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
                     # Update parameters
                     optimizer.step()
                     
+                    # Update learning rate scheduler
+                    scheduler.step()
+                    current_lr = scheduler.get_last_lr()[0]
+                    
                     # Log batch loss
                     epoch_loss += loss.item() * num_masked_tokens
                     total_tokens += num_masked_tokens
+                    global_step += 1
                     
                     if batch_idx % 10 == 0:
                         print(f"Epoch: {epoch+1}/{epochs}, Batch: {batch_idx}/{len(train_loader)}, "
-                              f"Loss: {loss.item():.4f}, Masked tokens: {num_masked_tokens}")
+                              f"Loss: {loss.item():.4f}, LR: {current_lr:.8f}, Masked tokens: {num_masked_tokens}")
                         wandb.log({
                             "batch_loss": loss.item(),
                             "masked_tokens": num_masked_tokens,
-                            "step": batch_idx + epoch * len(train_loader)
+                            "learning_rate": current_lr,
+                            "step": global_step
                         })
                 else:
                     print(f"Skipping batch {batch_idx} - no valid tokens for loss calculation")
@@ -319,10 +349,23 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
                 "train_loss": avg_epoch_loss,
                 "total_tokens": total_tokens
             })
+            
+            # Save model if loss improved
+            if avg_epoch_loss < best_loss:
+                best_loss = avg_epoch_loss
+                # Create checkpoints directory if it doesn't exist
+                os.makedirs("checkpoints", exist_ok=True)
+                try:
+                    # Save best model
+                    torch.save(model.state_dict(), "checkpoints/best_model.pt", _use_new_zipfile_serialization=False)
+                    print(f"Saved new best model with loss: {best_loss:.4f}")
+                except Exception as e:
+                    print(f"Error saving best model: {e}")
+                
         else:
             print(f"Epoch: {epoch+1}/{epochs}, No valid tokens processed")
         
-        # No checkpoint saving during training - only save at the end
+        # No checkpoint saving during training - only save at the end and best model
     
     # Create checkpoints directory if it doesn't exist
     os.makedirs("checkpoints", exist_ok=True)
