@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 from llama_encoder import LlamaEncoder
 torch.manual_seed(0) # for reproducibility
 torch.set_default_dtype(torch.float32)
+from huggingface_hub import login
 
 # use GPU if available
 if torch.cuda.is_available():
@@ -24,9 +25,9 @@ else:
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 
-epochs = 5
-lr = 1e-3
-batch_size = 50
+epochs = 3
+lr = 1e-4
+batch_size = 20
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
 label_encoder.to(device)
@@ -42,8 +43,9 @@ print("LlamaEncoder has been frozen and set to evaluation mode")
 proj_layer = torch.nn.Linear(2048, 768).to(device)
 
 class EncoderDataset(Dataset):
-    def __init__(self, X, y):
+    def __init__(self, X, attention_mask, y):
         self.X = X
+        self.attention_mask = attention_mask
         self.y = y
 
     def __len__(self):
@@ -51,7 +53,7 @@ class EncoderDataset(Dataset):
     
     def __getitem__(self, idx):
         with torch.no_grad():
-            return self.X[idx].clone().detach(), self.y[idx]
+            return self.X[idx].clone().detach(), self.attention_mask[idx].clone().detach(), self.y[idx]
             
 # dataset definition and preprocessing
 ds = load_dataset("KomeijiForce/Text2Emoji")
@@ -59,7 +61,7 @@ X = ds["train"]['text']
 y = ds['train']['emoji'] 
 
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, random_state = 0)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.2, random_state = 0)
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 label_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
 if label_tokenizer.pad_token is None:
@@ -74,18 +76,15 @@ print("Tokenizing test data...")
 X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
 y_test = label_tokenizer(y_test, padding=True, truncation=True, return_tensors="pt").input_ids
 
-voc_size = tokenizer.vocab_size
-embed_size = 128
-num_heads = 8
-num_layers = 6
-
 train_dataset = EncoderDataset(X_train_tokenized['input_ids'], 
-                              y_train)
+                               X_train_tokenized['attention_mask'],
+                               y_train)
 test_dataset = EncoderDataset(X_test_tokenized['input_ids'], 
+                              X_test_tokenized['attention_mask'],
                               y_test)
 
 model = BertModel.from_pretrained("bert-base-multilingual-cased").to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=5e-1)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,epochs)
 loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 print("Training dataset size: ", len(train_dataset))
@@ -99,24 +98,23 @@ training_loop = tqdm(range(epochs))
 model.train() 
 for epoch in training_loop:
     print('Epoch: ', epoch)
-    counter = 0
-    for X_batch, y_batch in loader:
-        print('Batch: ', counter + 1, ' out of ', int(len(X_train)/batch_size))
-        counter += 1
+    for X_batch, attention_mask_batch, y_batch in loader:
         X_batch = X_batch.to(device) 
+        attention_mask_batch = attention_mask_batch.to(device)
         y_batch = y_batch.to(device)
         optimizer.zero_grad()
         with torch.no_grad():
             y_batch = label_encoder(y_batch)
             y_batch = y_batch.mean(dim=1)
             y_batch = proj_layer(y_batch)  # Project Llama output to match BERT dimensions
-        loss = loss_fn(model(X_batch).last_hidden_state.mean(dim=1), y_batch)
+        loss = loss_fn(model(X_batch, attention_mask = attention_mask_batch).last_hidden_state.mean(dim=1), y_batch)
         loss.backward()
         optimizer.step()
-        torch.mps.empty_cache()     
+        torch.cuda.empty_cache()     
     training_loop.set_postfix(loss = loss.item())
     scheduler.step()
     losses.append(loss.item())
+    torch.save(model.state_dict(), 'tuned_bert_encoder_model.pt')
 plt.plot(losses, label='Training loss')
 plt.show()
 
@@ -129,23 +127,25 @@ with torch.no_grad():
     for i in range(0, len(X_train_tokenized['input_ids']), batch_size):
         end_idx = min(i + batch_size, len(X_train_tokenized['input_ids']))
         batch_input_ids = torch.tensor(X_train_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
+        batch_attention_ids = torch.tensor(X_train_tokenized['attention_mask'][i:end_idx], dtype=torch.long).to(device)
         batch_labels = y_train[i:end_idx].to(device)
         
-        batch_pred = model(batch_input_ids).last_hidden_state.mean(dim=1)
-        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).last_hidden_state.mean(dim=1))).item()
+        batch_pred = model(batch_input_ids, attention_mask = batch_attention_ids).last_hidden_state.mean(dim=1)
+        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).mean(dim=1))).item()
         train_losses.append(batch_loss)
-        torch.mps.empty_cache()
+        torch.cuda.empty_cache()
     
     # Process test data in batches
     for i in range(0, len(X_test_tokenized['input_ids']), batch_size):
         end_idx = min(i + batch_size, len(X_test_tokenized['input_ids']))
         batch_input_ids = torch.tensor(X_test_tokenized['input_ids'][i:end_idx], dtype=torch.long).to(device)
+        batch_attention_ids = torch.tensor(X_test_tokenized['attention_mask'][i:end_idx], dtype=torch.long).to(device)
         batch_labels = y_test[i:end_idx].to(device)
         
-        batch_pred = model(batch_input_ids).last_hidden_state.mean(dim=1)
-        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).last_hidden_state.mean(dim=1))).item()
+        batch_pred = model(batch_input_ids, attention_mask = batch_attention_ids).last_hidden_state.mean(dim=1)
+        batch_loss = loss_fn(batch_pred, proj_layer(label_encoder(batch_labels).mean(dim=1))).item()
         test_losses.append(batch_loss)
-        torch.mps.empty_cache()
+        torch.cuda.empty_cache()
     
     # Calculate and print average losses
     avg_train_loss = sum(train_losses) / len(train_losses)
