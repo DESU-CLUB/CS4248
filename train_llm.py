@@ -1,6 +1,6 @@
 from llm import GPT2Adapter, EmojiLLM
-from encoder import EmojiEncoder, Encoder
-from decoder import EmojiDecoder, CustomDecoder
+from encoder import Encoder
+from decoder import CustomDecoder
 from transformers import AutoModel, AutoTokenizer
 import datasets
 import torch
@@ -37,7 +37,7 @@ training_config = {
 
 
 class FullEmojiLLM:
-    def __init__(self, encoder: EmojiEncoder, decoder: EmojiDecoder, llm: EmojiLLM):
+    def __init__(self, encoder: Encoder, decoder: CustomDecoder, llm: EmojiLLM):
         self.encoder = encoder
         self.decoder = decoder
         self.llm = llm
