@@ -191,7 +191,7 @@ def train_llm(model: FullEmojiLLM, train_data, epochs: int, batch_size: int, lea
             loss_mask = batch["loss_mask"].to(device)
             
             # For decoder, we need target_ids (which are the same as input_ids for reconstruction)
-            target_ids = input_ids.clone()
+            target_ids = input_ids[:, 1:].clone()
             
             # Print debug info for first batch
             if batch_idx == 0 and epoch == 0:
