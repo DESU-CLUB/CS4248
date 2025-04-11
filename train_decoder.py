@@ -7,10 +7,14 @@ import decoder
 from encoder import Encoder
 from transformers import BertTokenizer
 from sklearn.model_selection import train_test_split
-import wandb
 import os
 import random
 import numpy as np
+from torch.cuda.amp import autocast, GradScaler
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Load the weights from Hugging Face
 state_dict = torch.hub.load_state_dict_from_url(
@@ -38,18 +42,25 @@ def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def train_decoder(num_epochs=15, use_llama_decoder=False, model_name="meta-llama/Llama-3.2-1B-Instruct"):
+def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/Llama-3.2-1B-Instruct", 
+                  use_wandb=True, debug_samples=None, accumulation_steps=4):
     """
-    Train the decoder model on a single GPU.
+    Train the decoder model on a single GPU with advanced optimizations.
     
     Args:
         num_epochs: Number of training epochs
         use_llama_decoder: If True, use LlamaDecoder instead of CustomDecoder
         model_name: Name/path of the Llama model (only used if use_llama_decoder=True)
+        use_wandb: Whether to use wandb for logging
+        debug_samples: Limit samples for debugging (None for full dataset)
+        accumulation_steps: Number of steps to accumulate gradients
     """
     # Set device to GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Initialize gradient scaler for mixed precision training
+    scaler = GradScaler()
     
     # Set seed for reproducibility
     set_seed(42)
@@ -57,6 +68,11 @@ def train_decoder(num_epochs=15, use_llama_decoder=False, model_name="meta-llama
     # Dataset definition and preprocessing
     ds = load_dataset("KomeijiForce/Text2Emoji")
     X = ds["train"]['text']
+    
+    # Limit samples if debugging
+    if debug_samples is not None:
+        print(f"DEBUG MODE: Using only {debug_samples} samples")
+        X = X[:debug_samples]
     
     # Split the input text for train/test
     X_train, X_test = train_test_split(X, test_size=0.3, random_state=0)
@@ -126,103 +142,175 @@ def train_decoder(num_epochs=15, use_llama_decoder=False, model_name="meta-llama
     print("Test dataset size:", len(test_dataset))
     print("Start training...")
     
-    # Initialize WandB
-    wandb.init(project="emoji_decoder_training")
-    wandb.config = {
-        "learning_rate": lr,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "embed_size": embed_size,
-        "num_heads": num_heads,
-        "num_layers": num_layers,
-        "decoder_type": "LlamaDecoder" if use_llama_decoder else "CustomDecoder"
-    }
-    wandb.watch(decoder_model, log="all")
+    # Initialize WandB if available and enabled
+    if use_wandb:
+        try:
+            import wandb
+            wandb.init(project="emoji_decoder_training")
+            wandb.config = {
+                "learning_rate": lr,
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "embed_size": embed_size,
+                "num_heads": num_heads,
+                "num_layers": num_layers,
+                "decoder_type": "LlamaDecoder" if use_llama_decoder else "CustomDecoder",
+                "accumulation_steps": accumulation_steps,
+                "mixed_precision": "bfloat16"
+            }
+            wandb.watch(decoder_model, log="all")
+            print("WandB initialized successfully")
+        except Exception as e:
+            print(f"Error initializing WandB: {e}")
+            use_wandb = False
 
     # Freeze encoder weights
     encoder.eval()
     for param in encoder.parameters():
         param.requires_grad = False
 
+    # Disable TF32 to use more conservative precision
+    try:
+        if device.type == 'cuda':
+            # Enable BF16 precision instead of TF32
+            print("Using BF16 precision for training")
+    except Exception as e:
+        print(f"Error configuring precision: {e}")
+
     for epoch in range(epochs):
         decoder_model.train()
         epoch_loss = 0.0
         
-        for batch_idx, batch in enumerate(loader):
+        # Clear cache at the start of each epoch
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        
+        for i, batch in enumerate(loader):
+            # Periodically clear cache to avoid memory fragmentation
+            if i % 50 == 0 and device.type == 'cuda':
+                torch.cuda.empty_cache()
+                
             input_ids, target_ids = batch
             input_ids = input_ids.to(device)
             target_ids = target_ids.to(device)
-            optimizer.zero_grad()
+            
+            # Only zero gradients when starting a new accumulation cycle
+            if i % accumulation_steps == 0:
+                optimizer.zero_grad()
             
             # Get encoder embeddings
             with torch.no_grad():
                 encoder_outputs = encoder(input_ids)
             
-            # Forward pass through decoder
-            if use_llama_decoder:
-                # For LlamaDecoder
-                logits = decoder_model(encoder_outputs, input_ids=input_ids)
-            else:
-                # For CustomDecoder
-                logits = decoder_model(encoder_outputs, target_ids)
+            # Use autocast for mixed precision training with bfloat16
+            with autocast(device_type='cuda', dtype=torch.bfloat16):
+                # Forward pass through decoder
+                if use_llama_decoder:
+                    # For LlamaDecoder
+                    logits = decoder_model(encoder_outputs, input_ids=input_ids)
+                    # Shift targets to align with logits (which already exclude first position)
+                    shift_labels = target_ids[:, 1:]  # Remove first token
+                else:
+                    # For CustomDecoder
+                    logits = decoder_model(encoder_outputs, target_ids)
+                    # Shift logits and labels for teacher forcing
+                    shift_logits = logits
+                    shift_labels = target_ids[:, 1:]  # Remove first token
+                
+                # Calculate loss
+                loss_fct = nn.CrossEntropyLoss()
+                
+                if use_llama_decoder:
+                    loss = loss_fct(logits.reshape(-1, logits.size(-1)), 
+                                   shift_labels.reshape(-1))
+                else:
+                    loss = loss_fct(shift_logits.reshape(-1, shift_logits.size(-1)), 
+                                   shift_labels.reshape(-1))
+                
+                # Normalize loss for gradient accumulation
+                loss = loss / accumulation_steps
+            
+            # Use scaler for backward pass and optimization
+            scaler.scale(loss).backward()
+            
+            # Only update weights after accumulation_steps
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
+                scaler.step(optimizer)
+                scaler.update()
             
             # Calculate loss
-            if use_llama_decoder:
-                # For LlamaDecoder
-                # Shift targets to align with logits (which already exclude first position)
-                shift_labels = target_ids[:, 1:]  # Remove first token
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits.reshape(-1, logits.size(-1)), 
-                                shift_labels.reshape(-1))
-            else:
-                # For CustomDecoder
-                # Shift logits and labels for teacher forcing
-                shift_logits = logits
-                shift_labels = target_ids[:, 1:]  # Remove first token
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(shift_logits.reshape(-1, shift_logits.size(-1)), 
-                                shift_labels.reshape(-1))
+            local_loss = loss.item() * accumulation_steps  # Rescale for reporting
+            epoch_loss += local_loss
             
-            # Backpropagation
-            loss.backward()
-            optimizer.step()
-            
-            # Log batch loss
-            epoch_loss += loss.item()
-            
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Batch: {batch_idx}/{len(loader)}, Loss: {loss.item():.4f}")
-                wandb.log({
-                    "train_loss": loss.item(),
-                    "epoch": epoch,
-                    "batch": batch_idx,
-                    "learning_rate": scheduler.get_last_lr()[0]
-                })
+            # Log periodically
+            if i % 10 == 0:
+                print(f"Epoch {epoch+1}/{epochs}, Batch: {i}/{len(loader)}, Loss: {local_loss:.4f}")
+                # Log to WandB if enabled
+                if use_wandb:
+                    wandb.log({
+                        "train_loss": local_loss,
+                        "epoch": epoch,
+                        "batch": i,
+                        "learning_rate": scheduler.get_last_lr()[0]
+                    })
 
         # Update learning rate scheduler
         scheduler.step()
         
         # Log epoch results
         avg_epoch_loss = epoch_loss / len(loader)
-        print(f"Epoch {epoch+1}, Loss: {avg_epoch_loss:.4f}")
-        wandb.log({
-            "epoch_loss": avg_epoch_loss,
-            "epoch": epoch
-        })
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_epoch_loss:.4f}")
+        
+        # Log to WandB if enabled
+        if use_wandb:
+            wandb.log({
+                "epoch_loss": avg_epoch_loss,
+                "epoch": epoch
+            })
 
     # Save the trained decoder model
     decoder_type = "llama_decoder" if use_llama_decoder else "custom_decoder"
-    torch.save(decoder_model.state_dict(), f"trained_{decoder_type}_model.pt")
-    wandb.finish()
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save(decoder_model.state_dict(), f"checkpoints/trained_{decoder_type}_model.pt")
+    print(f"Model saved to checkpoints/trained_{decoder_type}_model.pt")
+    
+    # Finalize WandB if enabled
+    if use_wandb:
+        wandb.finish()
     
     return decoder_model
 
 def main():
-    # Choose decoder type (set to True to use LlamaDecoder)
-    use_llama_decoder = True
+    # Check if wandb is available
+    use_wandb = True
+    try:
+        import wandb
+        # API key is loaded from .env file by load_dotenv()
+        print("wandb is available, will use it for logging")
+    except ImportError:
+        print("wandb not installed, continuing without logging")
+        use_wandb = False
     
-    # Train the decoder
-    train_decoder(num_epochs=15, use_llama_decoder=use_llama_decoder)
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Running on CPU.")
+    else:
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    
+    # Define training parameters
+    num_epochs = 5
+    debug_samples = None  # Limit to None samples for faster debugging, set to None for full dataset
+    use_llama_decoder = True
+    accumulation_steps = 4  # Number of batches to accumulate gradients
+    
+    # Start training
+    train_decoder(
+        num_epochs=num_epochs, 
+        use_llama_decoder=use_llama_decoder, 
+        use_wandb=use_wandb, 
+        debug_samples=debug_samples,
+        accumulation_steps=accumulation_steps
+    )
 
 if __name__ == "__main__":
     main()
