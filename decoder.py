@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 import math
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -143,3 +144,229 @@ class CustomDecoder(nn.Module):
             
         return torch.cat(generated_tokens, dim=1)
     
+class LlamaDecoder(nn.Module):
+    def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct", encoder_dim=2048, device=None):
+        """
+        LlamaDecoder using Llama 3.2 1B with an adapter for encoder embeddings.
+        
+        Args:
+            model_name: The model name/path for the Llama model
+            encoder_dim: Dimension of the encoder embeddings (default 2048)
+            device: Device to load the model on
+        """
+        super().__init__()
+        
+        # Set device
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+            
+        # Load model config first to get embedding dimension
+        self.config = AutoConfig.from_pretrained(model_name)
+        self.model_dim = self.config.hidden_size
+        
+        # Create embedding adapter (from encoder dimension to Llama hidden size)
+        self.adapter = nn.Sequential(
+            nn.Linear(encoder_dim, 4 * self.model_dim),
+            nn.LayerNorm(4 * self.model_dim),
+            nn.GELU(),
+            nn.Linear(4 * self.model_dim, self.model_dim),
+            nn.LayerNorm(self.model_dim)
+        )
+        
+        # Load Llama model
+        print(f"Loading Llama model: {model_name}")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,  # Use bfloat16 for memory efficiency
+            device_map=self.device
+        )
+        
+        # Move model components to device
+        self.adapter.to(self.device)
+        
+        # Get vocab size for final projection
+        self.vocab_size = self.model.config.vocab_size
+        print(f"Llama model loaded with vocab size: {self.vocab_size}")
+        
+        # Reference to the tokenizer's embedding layer for direct embedding lookup
+        self.token_embedding = self.model.get_input_embeddings()
+        
+    def forward(self, encoder_outputs, input_ids=None, inputs_embeds=None):
+        """
+        Forward pass through the LlamaDecoder.
+        
+        This method supports three modes:
+        1. With encoder_outputs only: Adapts the encoder outputs and uses them directly
+        2. With encoder_outputs + input_ids: Combines adapted encoder embeddings with input token embeddings
+        3. With encoder_outputs + inputs_embeds: Combines adapted encoder embeddings with provided embeddings
+        
+        Args:
+            encoder_outputs: Outputs from the encoder (batch_size, encoder_dim)
+            input_ids: Optional input token IDs for teacher forcing (batch_size, seq_len)
+            inputs_embeds: Optional pre-computed embeddings from another model (batch_size, seq_len, hidden_size)
+            
+        Returns:
+            Logits for next token prediction (batch_size, seq_len, vocab_size)
+        """
+        batch_size = encoder_outputs.size(0)
+        
+        # Adapt encoder outputs to match Llama hidden dimension
+        adapted_embeddings = self.adapter(encoder_outputs)
+        
+        # Reshape to (batch_size, 1, hidden_size) to serve as a prefix/conditioning
+        # This will be the first token embedding in the sequence
+        adapted_embeddings = adapted_embeddings.unsqueeze(1)
+        
+        # CASE 1: Using pre-computed embeddings from another model
+        if inputs_embeds is not None:
+            # Ensure inputs_embeds has the correct hidden dimension
+            if inputs_embeds.size(-1) != self.model_dim:
+                raise ValueError(f"Input embeddings dimension {inputs_embeds.size(-1)} doesn't match model dimension {self.model_dim}")
+            
+            # Concatenate adapted embeddings with provided embeddings
+            combined_embeds = torch.cat([adapted_embeddings, inputs_embeds], dim=1)
+            
+            # Create attention mask that includes all tokens
+            attention_mask = torch.ones(
+                (batch_size, combined_embeds.size(1)),
+                device=combined_embeds.device
+            )
+            
+            # Forward pass with embeddings directly
+            outputs = self.model(
+                inputs_embeds=combined_embeds,
+                attention_mask=attention_mask,
+                return_dict=True
+            )
+            
+            # Get logits (batch_size, seq_len, vocab_size)
+            logits = outputs.logits
+            
+            # Return logits without the first position (prefix token)
+            return logits[:, 1:, :]
+        
+        # CASE 2: Using input_ids for embedding lookup
+        elif input_ids is not None:
+            # Get embeddings for input_ids via the model's embedding layer
+            input_embeds = self.token_embedding(input_ids)
+            
+            # Concatenate adapted embeddings with input embeddings
+            combined_embeds = torch.cat([adapted_embeddings, input_embeds], dim=1)
+            
+            # Create attention mask that includes the prefix token
+            attention_mask = torch.ones(
+                (batch_size, combined_embeds.size(1)),
+                device=combined_embeds.device
+            )
+            
+            # Forward pass with embeddings directly
+            outputs = self.model(
+                inputs_embeds=combined_embeds,
+                attention_mask=attention_mask,
+                return_dict=True
+            )
+            
+            # Get logits (batch_size, seq_len, vocab_size)
+            logits = outputs.logits
+            
+            # Return logits without the first position (prefix token)
+            return logits[:, 1:, :]
+        
+        # CASE 3: Using only encoder outputs
+        else:
+            # Create attention mask for a single token
+            attention_mask = torch.ones((batch_size, 1), device=self.device)
+            
+            # Forward pass with just the adapted embeddings
+            outputs = self.model(
+                inputs_embeds=adapted_embeddings,
+                attention_mask=attention_mask,
+                return_dict=True
+            )
+            
+            # Return logits
+            return outputs.logits
+    
+    def generate(self, encoder_outputs, max_length=50, temperature=0.7, top_p=0.9, inputs_embeds=None):
+        """
+        Generate text from encoder outputs, optionally using initial embeddings.
+        
+        Args:
+            encoder_outputs: Encoder embeddings (batch_size, encoder_dim)
+            max_length: Maximum length of generated sequence
+            temperature: Sampling temperature
+            top_p: Nucleus sampling parameter
+            inputs_embeds: Optional initial embeddings from another model
+            
+        Returns:
+            Generated token IDs
+        """
+        batch_size = encoder_outputs.size(0)
+        
+        # Adapt encoder outputs
+        adapted_embeddings = self.adapter(encoder_outputs)
+        adapted_embeddings = adapted_embeddings.unsqueeze(1)
+        
+        # Initialize embeddings sequence
+        if inputs_embeds is not None:
+            # Start with adapted embeddings + provided embeddings
+            current_embeds = torch.cat([adapted_embeddings, inputs_embeds], dim=1)
+        else:
+            # Start with just adapted embeddings
+            current_embeds = adapted_embeddings
+        
+        # Start with an empty tensor for generated ids
+        generated_ids = torch.zeros((batch_size, 0), dtype=torch.long, device=self.device)
+        
+        # Generation loop
+        for _ in range(max_length):
+            # Create appropriate attention mask
+            attention_mask = torch.ones((batch_size, current_embeds.size(1)), device=self.device)
+            
+            # Forward pass with embeddings directly
+            with torch.no_grad():
+                outputs = self.model(
+                    inputs_embeds=current_embeds,
+                    attention_mask=attention_mask,
+                    return_dict=True
+                )
+            
+            # Get next token logits (last position)
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # Apply temperature
+            next_token_logits = next_token_logits / temperature
+            
+            # Apply top-p (nucleus) sampling
+            sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # Shift the indices to the right to keep also the first token above the threshold
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            
+            # Scatter sorted indices to original indexing
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            next_token_logits[indices_to_remove] = -float('Inf')
+            
+            # Sample next token
+            probs = torch.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append to generated ids
+            generated_ids = torch.cat([generated_ids, next_token], dim=1)
+            
+            # Get embeddings for next token
+            next_token_embeds = self.token_embedding(next_token)
+            
+            # Append to current embeddings
+            current_embeds = torch.cat([current_embeds, next_token_embeds], dim=1)
+            
+        return generated_ids
+    
+
+
