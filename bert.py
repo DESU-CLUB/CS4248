@@ -26,7 +26,7 @@ else:
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 
 epochs = 3
-lr = 1e-4
+lr = 1e-5
 batch_size = 20
 
 label_encoder = LlamaEncoder("meta-llama/Llama-3.2-1B-Instruct")
@@ -84,7 +84,7 @@ test_dataset = EncoderDataset(X_test_tokenized['input_ids'],
                               y_test)
 
 model = BertModel.from_pretrained("bert-base-multilingual-cased").to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=5e-1)
+optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-2)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,epochs)
 loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 print("Training dataset size: ", len(train_dataset))
