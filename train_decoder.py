@@ -82,10 +82,30 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     X_train = [str(x) for x in X_train]
     X_test = [str(x) for x in X_test]
 
-    print("Tokenizing training data...")
-    X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
-    print("Tokenizing test data...")
-    X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
+    # Create cache directory if it doesn't exist
+    os.makedirs("cache", exist_ok=True)
+    
+    # Define cache file paths
+    train_cache_path = f"cache/train_tokenized_{debug_samples if debug_samples else 'full'}.pt"
+    test_cache_path = f"cache/test_tokenized_{debug_samples if debug_samples else 'full'}.pt"
+    
+    # Check if cached tokenized data exists
+    if os.path.exists(train_cache_path) and os.path.exists(test_cache_path):
+        print("Loading tokenized data from cache...")
+        X_train_tokenized = torch.load(train_cache_path)
+        X_test_tokenized = torch.load(test_cache_path)
+        print("Tokenized data loaded from cache successfully")
+    else:
+        print("Tokenizing training data...")
+        X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
+        print("Tokenizing test data...")
+        X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
+        
+        # Save tokenized data to cache
+        print("Saving tokenized data to cache...")
+        torch.save(X_train_tokenized, train_cache_path)
+        torch.save(X_test_tokenized, test_cache_path)
+        print("Tokenized data saved to cache successfully")
 
     voc_size = tokenizer.vocab_size
     embed_size = 128
@@ -192,7 +212,7 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
                 
             input_ids, target_ids = batch
             input_ids = input_ids.to(device)
-            target_ids = target_ids.to(device)
+            target_ids = input_ids.to(device)
             
             # Only zero gradients when starting a new accumulation cycle
             if i % accumulation_steps == 0:
