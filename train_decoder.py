@@ -12,6 +12,10 @@ import random
 import numpy as np
 from torch.amp import autocast, GradScaler
 from dotenv import load_dotenv
+from transformers.tokenization_utils_base import BatchEncoding
+
+# Add BatchEncoding to safe globals for torch.load
+torch.serialization.add_safe_globals([BatchEncoding])
 
 # Load environment variables
 load_dotenv()
@@ -92,9 +96,25 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     # Check if cached tokenized data exists
     if os.path.exists(train_cache_path) and os.path.exists(test_cache_path):
         print("Loading tokenized data from cache...")
-        X_train_tokenized = torch.load(train_cache_path)
-        X_test_tokenized = torch.load(test_cache_path)
-        print("Tokenized data loaded from cache successfully")
+        try:
+            # Try loading with weights_only=False for backward compatibility
+            X_train_tokenized = torch.load(train_cache_path, weights_only=False)
+            X_test_tokenized = torch.load(test_cache_path, weights_only=False)
+            print("Tokenized data loaded from cache successfully")
+        except Exception as e:
+            print(f"Error loading from cache: {e}")
+            print("Falling back to tokenizing data...")
+            # Tokenize data if cache loading fails
+            print("Tokenizing training data...")
+            X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
+            print("Tokenizing test data...")
+            X_test_tokenized = tokenizer(X_test, padding=True, truncation=True, return_tensors="pt")
+            
+            # Save tokenized data to cache
+            print("Saving tokenized data to cache...")
+            torch.save(X_train_tokenized, train_cache_path)
+            torch.save(X_test_tokenized, test_cache_path)
+            print("Tokenized data saved to cache successfully")
     else:
         print("Tokenizing training data...")
         X_train_tokenized = tokenizer(X_train, padding=True, truncation=True, return_tensors="pt")
@@ -227,7 +247,7 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
                 # Forward pass through decoder
                 if use_llama_decoder:
                     # For LlamaDecoder
-                    logits = decoder_model(encoder_outputs, input_ids=input_ids)
+                    logits = decoder_model(encoder_outputs)
                     # Shift targets to align with logits (which already exclude first position)
                     shift_labels = target_ids[:, 1:]  # Remove first token
                 else:
