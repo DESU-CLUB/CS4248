@@ -66,7 +66,7 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     set_seed(42)
     
     # Dataset definition and preprocessing
-    ds = load_dataset("DESU-CLUB/combined_emoji_data")
+    ds = load_dataset("DESUCLUB/combined_emoji_data")
     X = ds["train"]['text']
     
     # Limit samples if debugging
