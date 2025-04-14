@@ -298,7 +298,7 @@ def main():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
     
     # Define training parameters
-    num_epochs = 5
+    num_epochs = 2
     debug_samples = None  # Limit to None samples for faster debugging, set to None for full dataset
     use_llama_decoder = True
     accumulation_steps = 4  # Number of batches to accumulate gradients
