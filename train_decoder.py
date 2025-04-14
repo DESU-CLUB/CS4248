@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 import os
 import random
 import numpy as np
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -66,7 +66,7 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     set_seed(42)
     
     # Dataset definition and preprocessing
-    ds = load_dataset("KomeijiForce/Text2Emoji")
+    ds = load_dataset("DESU-CLUB/combined_emoji_data")
     X = ds["train"]['text']
     
     # Limit samples if debugging
