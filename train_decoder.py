@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 import os
 import random
 import numpy as np
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 from dotenv import load_dotenv
 from transformers.tokenization_utils_base import BatchEncoding
 
@@ -62,9 +62,6 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     # Set device to GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
-    # Initialize gradient scaler for mixed precision training
-    scaler = GradScaler()
     
     # Set seed for reproducibility
     set_seed(42)
@@ -209,10 +206,9 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
     for param in encoder.parameters():
         param.requires_grad = False
 
-    # Disable TF32 to use more conservative precision
+    # Configure precision
     try:
         if device.type == 'cuda':
-            # Enable BF16 precision instead of TF32
             print("Using BF16 precision for training")
     except Exception as e:
         print(f"Error configuring precision: {e}")
@@ -233,6 +229,7 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
             input_ids, target_ids = batch
             input_ids = input_ids.to(device)
             target_ids = input_ids.to(device)
+            #print(f"Input IDs shape: {input_ids.shape}, Target IDs shape: {target_ids.shape}") 
             
             # Only zero gradients when starting a new accumulation cycle
             if i % accumulation_steps == 0:
@@ -246,10 +243,10 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 # Forward pass through decoder
                 if use_llama_decoder:
-                    # For LlamaDecoder
-                    logits = decoder_model(encoder_outputs)
-                    # Shift targets to align with logits (which already exclude first position)
-                    shift_labels = target_ids[:, 1:]  # Remove first token
+                    # For LlamaDecoder - pass both encoder outputs and shifted inputs
+                    input_ids_shifted = target_ids[:, :-1]  # Remove last token (for input)
+                    shift_labels = target_ids[:, 1:]        # Remove first token (for target)
+                    logits = decoder_model(encoder_outputs, input_ids_shifted)
                 else:
                     # For CustomDecoder
                     logits = decoder_model(encoder_outputs, target_ids)
@@ -261,22 +258,27 @@ def train_decoder(num_epochs=15, use_llama_decoder=True, model_name="meta-llama/
                 loss_fct = nn.CrossEntropyLoss()
                 
                 if use_llama_decoder:
-                    loss = loss_fct(logits.reshape(-1, logits.size(-1)), 
-                                   shift_labels.reshape(-1))
+                    #print(f"LlamaDecoder - logits shape: {logits.shape}, shift_labels shape: {shift_labels.shape}")
+                    # Reshape logits to match the vocabulary size expected by CrossEntropyLoss
+                    logits = logits.reshape(-1, logits.size(-1)).contiguous()
+                    shift_labels = shift_labels.reshape(-1).contiguous()
+                    #print(f"LlamaDecoder - reshaped logits: {logits.shape}, reshaped labels: {shift_labels.shape}")
+                    loss = loss_fct(logits, shift_labels)
                 else:
+                    #print(f"CustomDecoder - shift_logits shape: {shift_logits.shape}, shift_labels shape: {shift_labels.shape}")
+                    #print(f"CustomDecoder - reshaped logits: {shift_logits.reshape(-1, shift_logits.size(-1)).shape}, reshaped labels: {shift_labels.reshape(-1).shape}")
                     loss = loss_fct(shift_logits.reshape(-1, shift_logits.size(-1)), 
                                    shift_labels.reshape(-1))
                 
                 # Normalize loss for gradient accumulation
                 loss = loss / accumulation_steps
             
-            # Use scaler for backward pass and optimization
-            scaler.scale(loss).backward()
+            # Regular backward pass without scaler
+            loss.backward()
             
             # Only update weights after accumulation_steps
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
             
             # Calculate loss
             local_loss = loss.item() * accumulation_steps  # Rescale for reporting
@@ -339,7 +341,7 @@ def main():
     
     # Define training parameters
     num_epochs = 2
-    debug_samples = None  # Limit to None samples for faster debugging, set to None for full dataset
+    debug_samples = None# Limit to None samples for faster debugging, set to None for full dataset
     use_llama_decoder = True
     accumulation_steps = 4  # Number of batches to accumulate gradients
     
