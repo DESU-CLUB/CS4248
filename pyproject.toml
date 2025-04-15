@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "datasets>=3.3.2",
+  "evaluate>=0.4.3",
   "hf-transfer>=0.1.9",
   "instructor>=1.7.5",
   "ipykernel>=6.29.5",
@@ -14,6 +15,7 @@ dependencies = [
   "modal>=0.73.100",
   "peft>=0.14.0",
   "python-dotenv>=1.0.1",
+  "rouge-score>=0.1.2",
   "scikit-learn>=1.6.1",
   "transformers>=4.49.0",
   "trl>=0.15.2",
