@@ -35,16 +35,16 @@ class TokenizedDataset(Dataset):
         }
         
 class DecoderDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = X
+    def __init__(self, X, attention, y):
+        self.input_ids = X
+        self.attention_mask = attention
         self.y = y
 
     def __len__(self):
-        return len(self.X)
+        return len(self.y)
     
     def __getitem__(self, idx):
-        with torch.no_grad():
-            return self.X[idx].clone().detach(), self.y[idx]
+        return self.input_ids[idx], self.attention_mask[idx], self.y[idx]
 
 epochs = 3
 lr = 1e-5
@@ -61,33 +61,28 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
 ds = load_dataset("KomeijiForce/Text2Emoji")
 y = ds["train"]['text']
 y = [str(i) for i in ds["train"]['text']]
-y_tokenized = tokenizer(y, padding=True, truncation=True, return_tensors="pt")[:20]
-tokenized_dataset = TokenizedDataset(y_tokenized)
-y_loader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=True)
+y_tokenized = tokenizer(y, padding=True, truncation=True, return_tensors="pt")
+# tokenized_dataset = TokenizedDataset(y_tokenized)
+# y_loader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=True)
 
-embeddings = list()
-with torch.no_grad():
-    for y_batch_tokenized in y_loader:
-        out = encoder(input_ids=y_batch_tokenized['input_ids'].to(device), attention_mask=y_batch_tokenized['attention_mask'].to(device))
-        embeddings_batch = out.last_hidden_state
-        embeddings.append(embeddings_batch)
-X = torch.cat(embeddings,dim=0)
-print(X.shape)
+# embeddings = list()
+# with torch.no_grad():
+#     for y_batch_tokenized in y_loader:
+#         out = encoder(input_ids=y_batch_tokenized['input_ids'].to(device), attention_mask=y_batch_tokenized['attention_mask'].to(device))
+#         embeddings_batch = out.last_hidden_state
+#         embeddings.append(embeddings_batch)
+#         torch.cuda.empty_cache()
+# X = torch.cat(embeddings,dim=0)
 label_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 if label_tokenizer.pad_token is None:
     label_tokenizer.pad_token = "<|finetune_right_pad_id|>"
-label_tokenized = label_tokenizer(y, padding=True, truncation = True, return_tensors="pt")[:20]
-
+label_tokenized = label_tokenizer(y, padding=True, truncation = True, return_tensors="pt")
 label_seq_length = label_tokenized['input_ids'].size(1)
-X = X[:, :label_seq_length, :]
-if X.size(1) < label_seq_length:
-    padding = torch.zeros(X.size(0), label_seq_length - X.size(1), X.size(2)).to(device)
-    X = torch.cat([X, padding], dim=1)
 
-X_train, X_test, y_train, y_test = train_test_split(X, label_tokenized['input_ids'], test_size = 0.2, random_state = 0)
+X_train, X_test, X_attention_mask_train, X_attention_mask_test, y_train, y_test = train_test_split(y_tokenized['input_ids'], y_tokenized['attention_mask'], label_tokenized['input_ids'], test_size = 0.2, random_state = 0)
 
-train_dataset = DecoderDataset(X_train, y_train)
-test_dataset = DecoderDataset(X_test, y_test)
+train_dataset = DecoderDataset(X_train, X_attention_mask_train, y_train)
+test_dataset = DecoderDataset(X_test, X_attention_mask_test, y_test)
 
 model = GPT2LMHeadModel.from_pretrained('gpt2').to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-2)
@@ -95,16 +90,26 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,epochs)
 loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
 # train
+print("Start training")
 losses = []
 training_loop = tqdm(range(epochs))
 model.train() 
 for epoch in training_loop:
     print('Epoch: ', epoch)
-    for X_batch, y_batch in loader:
-        X_batch = X_batch.to(device) 
+    for X_batch, X_attention_mask, y_batch in loader:
+        X_batch = X_batch.to(device)
+        attention_mask = X_attention_mask.to(device)
+        with torch.no_grad():
+            input_embeddings = encoder(input_ids = X_batch, attention_mask = attention_mask).last_hidden_state
+        input_embeddings = input_embeddings[:, :label_seq_length]
+        if input_embeddings.size(1) < label_seq_length:
+            padding = torch.zeros(input_embeddings.size(0), label_seq_length - input_embeddings.size(1), input_embeddings.size(2)).to(device)
+            input_embeddings = torch.cat([input_embeddings, padding], dim=1)
+        
         y_batch = y_batch.to(device)
         optimizer.zero_grad()
-        out = model(input_embeds=X_batch, labels=y_batch)
+
+        out = model(inputs_embeds=input_embeddings.to(device), labels=y_batch)
         loss = out.loss
         loss.backward()
         optimizer.step()
@@ -114,6 +119,7 @@ for epoch in training_loop:
     losses.append(loss.item())
     torch.save(model.state_dict(), 'tuned_gpt2_decoder_model.pt')
 
+print("Start eval")
 model.eval()
 with torch.no_grad():
     train_losses = []
@@ -122,10 +128,17 @@ with torch.no_grad():
     # Process training data in batches
     for i in range(0, len(X_train), batch_size):
         end_idx = min(i + batch_size, len(X_train))
-        batch_input_ids = X_train[i:end_idx].to(device)
+        input_ids = X_train[i:end_idx].to(device)
+        attention_mask = X_attention_mask_train[i:end_idx].to(device)
+        with torch.no_grad():
+            input_embeddings = encoder(input_ids = input_ids, attention_mask = attention_mask).last_hidden_state
+        input_embeddings = input_embeddings[:, :label_seq_length]
+        if input_embeddings.size(1) < label_seq_length:
+            padding = torch.zeros(input_embeddings.size(0), label_seq_length - input_embeddings.size(1), input_embeddings.size(2)).to(device)
+            input_embeddings = torch.cat([input_embeddings, padding], dim=1)
         batch_labels = y_train[i:end_idx].to(device)
         
-        batch_out = model(input_embeds = batch_input_ids, labels = batch_labels)
+        batch_out = model(inputs_embeds = input_embeddings.to(device), labels = batch_labels)
         batch_loss = batch_out.loss.item()
         train_losses.append(batch_loss)
         torch.cuda.empty_cache()
@@ -133,10 +146,17 @@ with torch.no_grad():
     # Process test data in batches
     for i in range(0, len(X_test), batch_size):
         end_idx = min(i + batch_size, len(X_test))
-        batch_input_ids = X_test[i:end_idx].to(device)
+        input_ids = X_test[i:end_idx].to(device)
+        attention_mask = X_attention_mask_test[i:end_idx].to(device)
+        with torch.no_grad():
+            input_embeddings = encoder(input_ids = input_ids, attention_mask = attention_mask).last_hidden_state
+        input_embeddings = input_embeddings[:, :label_seq_length]
+        if input_embeddings.size(1) < label_seq_length:
+            padding = torch.zeros(input_embeddings.size(0), label_seq_length - input_embeddings.size(1), input_embeddings.size(2)).to(device)
+            input_embeddings = torch.cat([input_embeddings, padding], dim=1)
         batch_labels = y_test[i:end_idx].to(device)
         
-        batch_out = model(input_embeds = batch_input_ids, labels = batch_labels)
+        batch_out = model(inputs_embeds = input_embeddings.to(device), labels = batch_labels)
         batch_loss = batch_out.loss.item()
         test_losses.append(batch_loss)
         torch.cuda.empty_cache()
