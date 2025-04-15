@@ -408,7 +408,7 @@ if __name__ == "__main__":
     encoder_state_dict = torch.hub.load_state_dict_from_url(
         "https://huggingface.co/DESUCLUB/emoji_encoder_elco/resolve/main/trained_encoder_model.pt", 
         map_location=device
-    )
+)
     
     # Initialize encoder with config parameters
     encoder = Encoder(**encoder_config).to(device)
