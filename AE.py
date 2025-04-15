@@ -3,6 +3,7 @@ from transformers import BertTokenizer, BertModel, GPT2LMHeadModel, GPT2Tokenize
 torch.manual_seed(0) # for reproducibility
 torch.set_default_dtype(torch.float32)
 from datasets import load_dataset
+import torch.nn as nn
 from huggingface_hub import login
 # put huggingface token 
 
@@ -17,9 +18,9 @@ else:
    device = torch.device("cpu")
    print("CPU")
 
-class Autoencoder():
+class Autoencoder(nn.Module):
    def __init__(self, device):
-      super().__init__()
+      super(Autoencoder, self).__init__()
       self.device = device
       self.encoder = BertModel.from_pretrained('bert-base-multilingual-cased')
       self.encoder_state_dict = torch.load('tuned_bert_encoder_model.pt', map_location="cpu")
